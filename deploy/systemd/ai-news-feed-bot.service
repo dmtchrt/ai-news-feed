@@ -1,0 +1,35 @@
+[Unit]
+Description=AI News Feed Telegram bot worker
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=ai-news-feed
+Group=ai-news-feed
+WorkingDirectory=/opt/ai-news-feed/current
+EnvironmentFile=/etc/ai-news-feed/bot.env
+ExecStart=/opt/ai-news-feed/venv/bin/ai-news-feed-bot
+Restart=always
+RestartSec=5s
+TimeoutStopSec=30s
+KillSignal=SIGINT
+
+# The worker needs only outbound network access and its Python runtime.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ai-news-feed-bot
+
+[Install]
+WantedBy=multi-user.target

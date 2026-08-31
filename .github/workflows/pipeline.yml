@@ -1,0 +1,50 @@
+name: AI News Feed pipeline
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 01:17, 07:17, 13:17 and 19:17 UTC every day.
+    - cron: "17 1,7,13,19 * * *"
+
+concurrency:
+  group: ai-news-feed-pipeline
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_SCREENING_MODEL: ${{ secrets.OPENAI_SCREENING_MODEL }}
+      OPENAI_SUMMARY_MODEL: ${{ secrets.OPENAI_SUMMARY_MODEL }}
+      TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+      TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+      TELEGRAM_SESSION: ${{ secrets.TELEGRAM_SESSION }}
+      INTEREST_PROFILE_ID: default
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.7"
+          python-version: "3.12"
+          enable-cache: true
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: ${{ runner.os }}-semhash-model-v1
+
+      - name: Install locked dependencies
+        run: uv sync --frozen --no-dev
+
+      - name: Run one finite pipeline invocation
+        run: uv run --no-sync ai-news-feed-pipeline

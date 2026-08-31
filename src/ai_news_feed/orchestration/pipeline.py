@@ -1,0 +1,292 @@
+"""One finite, idempotent pipeline-runner invocation."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from typing import Protocol, cast
+
+import httpx
+from telegram import Bot
+from telethon import TelegramClient
+from telethon.sessions import StringSession
+
+from ai_news_feed.dedup.semantic import DEFAULT_MODEL, SemanticClusterer
+from ai_news_feed.delivery.telegram import TelegramBotAPI, TelegramDelivery
+from ai_news_feed.digest import DigestComposer
+from ai_news_feed.domain.models import CollectorKind, DeliveryReceipt, Digest, InterestProfile
+from ai_news_feed.extraction import ContentExtractor, ExtractedItem
+from ai_news_feed.llm.openai import OpenAIResponsesClient
+from ai_news_feed.processing import AIProcessingResult, AIProcessor, ExtractedRawItem
+from ai_news_feed.screening import ClusterScreener
+from ai_news_feed.sources.base import SourceConnector
+from ai_news_feed.sources.rss import NativeRssConnector, RssBridgeConnector
+from ai_news_feed.sources.site import UniversalSiteConnector
+from ai_news_feed.sources.telegram import TelegramWebPreviewConnector, TelethonConnector
+from ai_news_feed.storage.base import Repository
+from ai_news_feed.storage.postgres import PostgresRepository
+from ai_news_feed.summarization import ClusterSummarizer
+
+logger = logging.getLogger(__name__)
+
+
+class Processor(Protocol):
+    async def process(
+        self,
+        items: Sequence[ExtractedRawItem],
+        *,
+        interest_profile_id: str,
+        interest_profile: InterestProfile | None = None,
+    ) -> AIProcessingResult: ...
+
+
+class Delivery(Protocol):
+    async def send(self, digest: Digest) -> DeliveryReceipt: ...
+
+
+@dataclass(frozen=True)
+class PipelineRunReport:
+    sources: int
+    collected_items: int
+    extraction_failures: int
+    stored_materials: int
+    clusters: int
+    digest_posts: int
+    resumed_digests: int
+
+
+class PipelineRunner:
+    def __init__(
+        self,
+        *,
+        repository: Repository,
+        connectors: Mapping[CollectorKind, SourceConnector],
+        processor: Processor,
+        delivery: Delivery,
+        channel_id: str | int,
+        interest_profile_id: str = "default",
+        extractor: ContentExtractor | None = None,
+        composer: DigestComposer | None = None,
+    ) -> None:
+        self._repository = repository
+        self._connectors = connectors
+        self._processor = processor
+        self._delivery = delivery
+        self._channel_id = channel_id
+        self._profile_id = interest_profile_id
+        self._extractor = extractor or ContentExtractor()
+        self._composer = composer or DigestComposer()
+
+    async def run(self) -> PipelineRunReport:
+        pending = await self._repository.list_pending_digests()
+        for pending_digest in pending:
+            await self._delivery.send(pending_digest)
+
+        sources, profile = await self._repository.load_context(self._profile_id)
+        extracted: list[ExtractedRawItem] = []
+        cursor_updates = {}
+        collected_items = 0
+        extraction_failures = 0
+        for source in sources:
+            try:
+                connector = self._connectors[source.collector]
+            except KeyError as exc:
+                raise RuntimeError(
+                    f"collector {source.collector.value} is not configured for source {source.id}"
+                ) from exc
+            batch = await connector.collect(source, source.cursor)
+            collected_items += len(batch.raw_items)
+            for error in batch.errors:
+                logger.warning(
+                    "source=%s code=%s retryable=%s: %s",
+                    error.source_id,
+                    error.code,
+                    error.retryable,
+                    error.message,
+                )
+            if batch.next_cursor is not None and not any(error.retryable for error in batch.errors):
+                cursor_updates[source.id] = batch.next_cursor
+            for raw_item in batch.raw_items:
+                result = self._extractor.extract(raw_item)
+                if isinstance(result, ExtractedItem):
+                    extracted.append(ExtractedRawItem(raw_item, result))
+                else:
+                    extraction_failures += 1
+                    logger.warning(
+                        "source=%s external_id=%s extraction=%s: %s",
+                        raw_item.source_id,
+                        raw_item.external_id,
+                        result.code,
+                        result.message,
+                    )
+
+        processing = await self._processor.process(
+            extracted,
+            interest_profile_id=profile.id,
+            interest_profile=profile,
+        )
+        digest = self._composer.compose(
+            processing.digest_items,
+            profile_id=profile.id,
+            profile_version=profile.version,
+        )
+        await self._repository.save_processing_result(
+            materials=processing.materials,
+            clusters=processing.cluster_batch.clusters,
+            duplicate_links=processing.cluster_batch.duplicate_links,
+            screening_results=processing.screening_results,
+            profile_id=profile.id,
+            profile_version=profile.version,
+            digest=digest,
+            channel_id=str(self._channel_id) if digest is not None else None,
+        )
+        if digest is not None:
+            await self._delivery.send(digest)
+
+        await self._repository.save_processing_result(
+            materials=(),
+            clusters=(),
+            duplicate_links=(),
+            screening_results=(),
+            profile_id=profile.id,
+            profile_version=profile.version,
+            source_cursors=cursor_updates,
+        )
+        return PipelineRunReport(
+            sources=len(sources),
+            collected_items=collected_items,
+            extraction_failures=extraction_failures,
+            stored_materials=len(processing.materials),
+            clusters=len(processing.cluster_batch.clusters),
+            digest_posts=len(digest.posts) if digest is not None else 0,
+            resumed_digests=len(pending),
+        )
+
+
+@dataclass(frozen=True)
+class PipelineSettings:
+    database_url: str
+    telegram_bot_token: str
+    telegram_channel_id: str | int
+    openai_api_key: str
+    openai_screening_model: str
+    openai_summary_model: str
+    openai_base_url: str
+    interest_profile_id: str
+    semhash_model: str
+    telegram_api_id: int | None
+    telegram_api_hash: str | None
+    telegram_session: str | None
+
+    @classmethod
+    def from_env(cls) -> PipelineSettings:
+        channel = _required_env("TELEGRAM_CHANNEL_ID")
+        channel_id: str | int = int(channel) if channel.lstrip("-").isdigit() else channel
+        api_id = os.environ.get("TELEGRAM_API_ID", "").strip()
+        return cls(
+            database_url=_required_env("DATABASE_URL"),
+            telegram_bot_token=_required_env("TELEGRAM_BOT_TOKEN"),
+            telegram_channel_id=channel_id,
+            openai_api_key=_required_env("OPENAI_API_KEY"),
+            openai_screening_model=_required_env("OPENAI_SCREENING_MODEL"),
+            openai_summary_model=_required_env("OPENAI_SUMMARY_MODEL"),
+            openai_base_url=os.environ.get(
+                "OPENAI_BASE_URL",
+                "https://api.openai.com/v1",
+            ).strip(),
+            interest_profile_id=os.environ.get("INTEREST_PROFILE_ID", "default").strip(),
+            semhash_model=os.environ.get("SEMHASH_MODEL", DEFAULT_MODEL).strip(),
+            telegram_api_id=int(api_id) if api_id else None,
+            telegram_api_hash=os.environ.get("TELEGRAM_API_HASH") or None,
+            telegram_session=os.environ.get("TELEGRAM_SESSION") or None,
+        )
+
+
+async def run_from_env() -> PipelineRunReport:
+    settings = PipelineSettings.from_env()
+    repository = PostgresRepository(settings.database_url, pooled=False)
+    telethon_client: TelegramClient | None = None
+    try:
+        async with httpx.AsyncClient(follow_redirects=True) as http_client:
+            connectors: dict[CollectorKind, SourceConnector] = {
+                CollectorKind.NATIVE_RSS: NativeRssConnector(http_client),
+                CollectorKind.RSS_BRIDGE: RssBridgeConnector(http_client),
+                CollectorKind.UNIVERSAL_SCRAPER: UniversalSiteConnector(http_client),
+                CollectorKind.WEB_PREVIEW: TelegramWebPreviewConnector(http_client),
+            }
+            sources = await repository.list_sources()
+            if any(source.collector is CollectorKind.TELETHON for source in sources):
+                if (
+                    settings.telegram_api_id is None
+                    or not settings.telegram_api_hash
+                    or not settings.telegram_session
+                ):
+                    raise RuntimeError(
+                        "TELEGRAM_API_ID, TELEGRAM_API_HASH and TELEGRAM_SESSION are required "
+                        "for Telethon sources"
+                    )
+                telethon_client = TelegramClient(
+                    StringSession(settings.telegram_session),
+                    settings.telegram_api_id,
+                    settings.telegram_api_hash,
+                )
+                await telethon_client.connect()
+                if not await telethon_client.is_user_authorized():
+                    raise RuntimeError("TELEGRAM_SESSION is not authorized")
+                connectors[CollectorKind.TELETHON] = TelethonConnector(telethon_client)
+
+            screening_client = OpenAIResponsesClient(
+                api_key=settings.openai_api_key,
+                model=settings.openai_screening_model,
+                base_url=settings.openai_base_url,
+                max_output_tokens=1_000,
+                client=http_client,
+            )
+            summary_client = OpenAIResponsesClient(
+                api_key=settings.openai_api_key,
+                model=settings.openai_summary_model,
+                base_url=settings.openai_base_url,
+                max_output_tokens=2_000,
+                client=http_client,
+            )
+            processor = AIProcessor(
+                repository=repository,
+                semantic_clusterer=SemanticClusterer(model_name=settings.semhash_model),
+                screener=ClusterScreener(screening_client),
+                summarizer=ClusterSummarizer(summary_client),
+            )
+            async with Bot(settings.telegram_bot_token) as bot:
+                delivery = TelegramDelivery(
+                    bot=cast(TelegramBotAPI, bot),
+                    repository=repository,
+                    channel_id=settings.telegram_channel_id,
+                )
+                runner = PipelineRunner(
+                    repository=repository,
+                    connectors=connectors,
+                    processor=processor,
+                    delivery=delivery,
+                    channel_id=settings.telegram_channel_id,
+                    interest_profile_id=settings.interest_profile_id,
+                )
+                return await runner.run()
+    finally:
+        if telethon_client is not None:
+            await telethon_client.disconnect()
+        await repository.close()
+
+
+def main() -> None:
+    logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
+    report = asyncio.run(run_from_env())
+    logger.info("pipeline completed: %s", report)
+
+
+def _required_env(name: str) -> str:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        raise RuntimeError(f"{name} is required")
+    return value

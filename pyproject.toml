@@ -9,16 +9,24 @@ description = "Personal AI news feed pipeline"
 readme = "PRD.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+  "alembic>=1.16,<2",
   "beautifulsoup4>=4.13,<5",
   "feedparser>=6.0.11,<7",
   "httpx>=0.28,<1",
   "pdfplumber>=0.11,<1",
+  "psycopg[binary]>=3.2,<4",
   "pydantic>=2.11,<3",
   "python-docx>=1.2,<2",
+  "python-telegram-bot>=22,<23",
   "semhash>=0.4.1,<0.5",
+  "sqlalchemy>=2.0.43,<3",
   "telethon>=1.40,<2",
   "trafilatura>=2.0,<3",
 ]
+
+[project.scripts]
+ai-news-feed-bot = "ai_news_feed.bot.app:main"
+ai-news-feed-pipeline = "ai_news_feed.orchestration.pipeline:main"
 
 [dependency-groups]
 dev = [
@@ -64,4 +72,8 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = "semhash"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "telethon.*"
 ignore_missing_imports = true

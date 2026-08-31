@@ -1,5 +1,5 @@
-# Архитектура MVP v0.6
-_31.08.2026_
+# Архитектура MVP v0.7
+_01.09.2026_
 
 ## Пайплайн
 Источники → нормализация → дедуп/кластеризация → фильтр релевантности интересам и
@@ -89,6 +89,7 @@ src/ai_news_feed/
   dedup/exact.py               # дешёвый фильтр по content_hash
   dedup/semantic.py            # SemHash и сборка кластеров
   llm/base.py                  # тонкий Protocol LLMClient
+  llm/openai.py                # Responses API + Structured Outputs
   screening.py                 # релевантность + реклама/шум
   summarization.py             # саммари принятого кластера
   processing.py                # композиция шагов 4–8 без persistence
@@ -101,7 +102,10 @@ src/ai_news_feed/
   bot/handlers.py              # управление источниками/интересами в личке
   bot/app.py                   # постоянно работающий long-polling bot-worker
   orchestration/pipeline.py    # порядок шагов, retry, метрики прогона
-  cli.py                       # run-pipeline, run-bot, validate-source
+deploy/
+  .env.example                 # шаблон без реальных секретов
+  README.md                    # ручной hand-off Neon/VPS/GitHub Actions
+  systemd/ai-news-feed-bot.service
 tests/
   unit/
   integration/
@@ -200,7 +204,13 @@ tests/
 `SourceConnector`, `LLMClient`, `Repository` и `DigestDelivery` оформляются как Python
 `Protocol`. Для unit-тестов подставляются in-memory реализации; интеграционные тесты
 работают на зафиксированных RSS/HTML/Telegram fixtures и отдельной тестовой Postgres-БД
-(service container в CI, откат транзакции после теста).
+(service container в CI, очистка данных между тестами, весь контейнер эфемерен).
+
+На 01.09.2026 выбран именно Postgres 18 service container в GitHub Actions: он проверяет
+настоящие enum/JSONB/FK/check constraints, optimistic update и транзакции и не требует
+Docker на Mac PO. Testcontainers дал бы более быстрый локальный feedback, но требует
+локальный Docker; mock SQLAlchemy быстрее обоих вариантов, однако не ловит различия
+диалекта и поэтому оставлен только на уровне fake Repository.
 
 Граница LLM намеренно мала: `LLMClient.complete(LLMRequest) -> LLMResponse`, где request
 содержит system/user prompt и JSON Schema, а response — текст и фактическое имя модели.
@@ -447,7 +457,8 @@ auto-news заимствуем контрольные точки и метрик
 
 ### Общее состояние: отдельный Neon-проект
 
-Создаётся новый Neon-проект **AI News Feed** с Postgres 18 и TLS. Он находится у того же
+PO должен вручную создать новый Neon-проект **AI News Feed** с Postgres 18 и TLS. Он
+может находиться у того же
 провайдера, что и база `rus-ai.com`, но не использует её project id, connection string,
 database, role или schema. Такая граница исключает случайные миграции/удаления данных
 рабочего сервиса и позволяет независимо удалить, восстановить или перенести пет-проект.
@@ -464,6 +475,13 @@ database, role или schema. Такая граница исключает сл�
 Миграции Alembic запускаются отдельной командой до старта новой версии приложения, не
 автоматически из двух процессов. Для bot-worker используется маленький connection pool
 с `pool_pre_ping`; конечный pipeline-runner не держит соединения после завершения.
+
+Реализованная схема хранит `sources`, `interest_profiles`, `materials`, `news_clusters` +
+явное членство `cluster_materials`, `duplicate_links`, versioned `screening_results`,
+`digests`, `digest_items` и checkpoint-строки `digest_posts`. Нормализованный locator
+источника имеет unique constraint; удаление источника в UI — soft delete, поэтому история
+материалов не уничтожается, а повторное добавление восстанавливает ту же запись. Изменение
+профиля выполняется `UPDATE ... WHERE version = expected_version` с атомарным `version+1`.
 
 ### Bot-worker: systemd на VPS
 
@@ -498,6 +516,11 @@ Systemd restart-policy и собственный VPS закрывают преж
 не импортирует ML-модули pipeline-runner; после измерений unit можно ограничить через
 systemd `MemoryMax`/`CPUQuota`.
 
+Bot-worker принимает команды только от `TELEGRAM_OWNER_USER_ID` и работает в private
+chat. Кнопки и переходы состояния остаются framework-independent в `bot/handlers.py`;
+тонкий `python-telegram-bot`-адаптер только переводит Update/callback в эти вызовы. Поэтому
+unit-тесты используют одновременно fake Repository и fake Bot API, не сетевой Telegram.
+
 ### Pipeline-runner: только GitHub Actions
 
 Периодический `pipeline-runner` остаётся в GitHub Actions и **не запускается на VPS**.
@@ -508,6 +531,19 @@ systemd `MemoryMax`/`CPUQuota`.
 Workflow получает отдельный Neon `DATABASE_URL`, Telegram/Telethon secrets, выполняет
 один идемпотентный прогон и завершается. VPS хранит только лёгкий bot-worker; код и
 `Repository` у двух компонентов общие, а runtime и deployment независимы.
+
+`pipeline-runner` перед сбором возобновляет все незавершённые delivery plan. Новый
+delivery plan сохраняется в одной Postgres-транзакции с материалами/кластерами/оценками,
+после чего Telegram-посты подтверждаются по одному; source cursor двигается только после
+успешной доставки. Это не обещает невозможную distributed exactly-once семантику: при
+падении строго между успешным `sendMessage` и записью его message id возможен повтор одной
+части, но все уже записанные checkpoint-части повторно не публикуются.
+
+LLM-адаптер использует OpenAI Responses API со Structured Outputs и `store=false`, но
+скрыт за прежним `LLMClient`. Точные screening/summary model id обязательны в env и не
+зашиты в код. Варианты выбора: одна малая модель дешевле и проще; малая для screening +
+более сильная для summary (рекомендуемый баланс); одна сильная для обоих шагов проще для
+оценки качества, но дороже. Модель выбирается PO по текущим доступу и цене.
 
 ### Открытый вопрос: как запускать RSS-Bridge
 

@@ -13,6 +13,7 @@ from ai_news_feed.domain.models import (
     DigestItem,
     DuplicateLink,
     ExactDeduplicationResult,
+    InterestProfile,
     Material,
     NewsCluster,
     RawItem,
@@ -71,13 +72,18 @@ class AIProcessor:
         items: Sequence[ExtractedRawItem],
         *,
         interest_profile_id: str,
+        interest_profile: InterestProfile | None = None,
         now: datetime | None = None,
     ) -> AIProcessingResult:
         run_time = now or datetime.now(UTC)
         if run_time.tzinfo is None or run_time.utcoffset() is None:
             raise ValueError("now must be timezone-aware")
         run_time = run_time.astimezone(UTC)
-        profile = await self.repository.get_interest_profile(interest_profile_id)
+        profile = interest_profile or await self.repository.get_interest_profile(
+            interest_profile_id
+        )
+        if profile.id != interest_profile_id:
+            raise ValueError("interest_profile id does not match interest_profile_id")
 
         materials = tuple(
             self.normalizer.normalize(
@@ -87,10 +93,17 @@ class AIProcessor:
             )
             for item in items
         )
+        existing_ids = {
+            material.id
+            for material in await self.repository.find_materials_by_ids(
+                {material.id for material in materials}
+            )
+        }
+        new_materials = tuple(material for material in materials if material.id not in existing_ids)
         existing_exact = await self.repository.find_materials_by_content_hashes(
-            {material.content_hash for material in materials}
+            {material.content_hash for material in new_materials}
         )
-        exact_result = self.exact_deduper.deduplicate(materials, existing_exact)
+        exact_result = self.exact_deduper.deduplicate(new_materials, existing_exact)
         lookback_materials = await self.repository.list_materials_since(run_time - self.lookback)
         semantic_batch = self.semantic_clusterer.cluster(
             exact_result.unique_materials,
@@ -102,7 +115,7 @@ class AIProcessor:
         )
 
         material_by_id = {material.id: material for material in lookback_materials}
-        material_by_id.update((material.id, material) for material in materials)
+        material_by_id.update((material.id, material) for material in new_materials)
         screenings: list[ScreeningResult] = []
         digest_items: list[DigestItem] = []
         for cluster in cluster_batch.clusters:
@@ -117,7 +130,7 @@ class AIProcessor:
                 digest_items.append(await self.summarizer.summarize(cluster, cluster_materials))
 
         return AIProcessingResult(
-            materials=materials,
+            materials=new_materials,
             exact_deduplication=exact_result,
             cluster_batch=cluster_batch,
             screening_results=tuple(screenings),

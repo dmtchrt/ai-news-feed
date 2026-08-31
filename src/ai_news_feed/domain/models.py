@@ -357,3 +357,65 @@ class DigestItem(ContractModel):
             if parsed.scheme not in {"http", "https"} or not parsed.netloc:
                 raise ValueError("source links must be absolute HTTP(S) URLs")
         return stripped
+
+
+class Digest(ContractModel):
+    """A deterministic, Telegram-sized delivery plan."""
+
+    id: str = Field(min_length=1)
+    profile_id: str = Field(min_length=1)
+    profile_version: int = Field(ge=1)
+    items: tuple[DigestItem, ...] = Field(min_length=1)
+    posts: tuple[str, ...] = Field(min_length=1)
+    created_at: datetime
+
+    @field_validator("id", "profile_id")
+    @classmethod
+    def digest_ids_are_stripped(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("digest ids must not be blank")
+        return stripped
+
+    @field_validator("posts")
+    @classmethod
+    def digest_posts_are_nonempty(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        stripped = tuple(value.strip() for value in values)
+        if any(not value for value in stripped):
+            raise ValueError("digest posts must not be blank")
+        return stripped
+
+    @field_validator("created_at")
+    @classmethod
+    def digest_time_is_utc(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("created_at must be timezone-aware")
+        return value.astimezone(UTC)
+
+
+class DeliveryReceipt(ContractModel):
+    digest_id: str = Field(min_length=1)
+    telegram_message_ids: tuple[int, ...] = Field(min_length=1)
+    sent_at: datetime
+
+    @field_validator("digest_id")
+    @classmethod
+    def receipt_id_is_stripped(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("digest_id must not be blank")
+        return stripped
+
+    @field_validator("telegram_message_ids")
+    @classmethod
+    def message_ids_are_positive(cls, values: tuple[int, ...]) -> tuple[int, ...]:
+        if any(value < 1 for value in values):
+            raise ValueError("telegram message ids must be positive")
+        return values
+
+    @field_validator("sent_at")
+    @classmethod
+    def sent_time_is_utc(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("sent_at must be timezone-aware")
+        return value.astimezone(UTC)

@@ -62,21 +62,27 @@ _27.08.2026_
       Postgres не является блокером AI/ML-среза.
 
 ## 4. Backend/инфраструктура
-- [ ] Создать отдельный Neon-проект AI News Feed (Postgres 18, TLS, собственные
+- [ ] PO: создать отдельный Neon-проект AI News Feed (Postgres 18, TLS, собственные
       project/database/role/`DATABASE_URL`, без общей БД или schema с `rus-ai.com`) и
-      Postgres-схему: источники с уникальным id/защитой от дублей, интересы, материалы,
-      кластеры, оценка релевантности, отправленные дайджесты. Миграции — Alembic, доступ —
-      `PostgresRepository` на SQLAlchemy Core/psycopg 3.
-- [ ] Постоянный bot-worker с непрерывным long polling: управление источниками в личке
+      вручную применить миграции.
+- [x] Postgres-схема источников/интересов/материалов/кластеров/duplicate links/оценок/
+      дайджестов, Alembic и общий async `PostgresRepository` на SQLAlchemy Core/psycopg 3;
+      интеграционный Postgres 18 поднимается service container-ом только в CI.
+- [x] Постоянный bot-worker с непрерывным long polling: управление источниками в личке
       («Добавить источник» / «Посмотреть все источники» / «Удалить источник», проверка
       дублей) и просмотр/редактирование `InterestProfile` через Postgres (см.
       ARCHITECTURE.md).
-- [ ] Развернуть bot-worker на VPS отдельным systemd-unit: собственный venv и каталог,
+- [x] Добавить deployment-шаблоны `deploy/`: отдельный systemd-unit, env example и
+      пошаговый hand-off без реальных секретов/внешних действий.
+- [ ] PO: развернуть bot-worker на VPS отдельным systemd-unit: собственный venv и каталог,
       `Restart=always`, автозапуск после reboot, отдельный environment-файл и отдельный
       непривилегированный OS-пользователь. Не менять unit/Nginx/venv `rus-ai.com`.
-- [ ] GitHub Actions workflow: расписание + запуск pipeline-runner только на GitHub runner,
+- [x] GitHub Actions workflow: расписание + запуск pipeline-runner только на GitHub runner,
       с подключением к отдельному Neon-проекту; pipeline-runner на VPS не переносить.
-- [ ] Отправка дайджеста в Telegram-канал через Bot API (бот — админ канала).
+- [ ] PO: добавить GitHub Actions secrets и проверить `workflow_dispatch` после merge в
+      `main` (без секретов cron ожидаемо не может пройти).
+- [x] Отправка дайджеста в Telegram-канал через Bot API (бот — админ канала), с
+      детерминированным разбиением по лимиту и checkpoint на каждую часть.
 
 ## 5. Ревьюер
 - [ ] Проверка каждого шага по критериям из PRD.md перед приёмкой PO.
