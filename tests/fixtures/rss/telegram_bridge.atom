@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>@ailev_blog</title>
+  <id>https://t.me/s/ailev_blog</id>
+  <updated>2026-08-31T04:00:00Z</updated>
+  <entry>
+    <title>Системное мышление и ИИ</title>
+    <id>https://t.me/ailev_blog/9001</id>
+    <link href="https://t.me/ailev_blog/9001" />
+    <updated>2026-08-31T04:00:00Z</updated>
+    <content type="html"><![CDATA[<p>Полный текст поста из публичного preview.</p>]]></content>
+  </entry>
+</feed>

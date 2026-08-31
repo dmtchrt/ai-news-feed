@@ -1,4 +1,4 @@
-# Архитектура MVP v0.4
+# Архитектура MVP v0.5
 _31.08.2026_
 
 ## Пайплайн
@@ -79,9 +79,11 @@ src/ai_news_feed/
   config.py                    # настройки из env/БД
   sources/base.py              # протокол SourceConnector
   sources/rss.py               # нативный RSS + выдача RSS-Bridge
-  sources/telegram.py          # Telethon
+  sources/site.py              # универсальный CSS-скрапер сайтов без RSS
+  sources/telegram.py          # web-preview + Telethon
+  sources/presets.py           # проверенные адреса/настройки источников ★
   sources/manual.py            # ссылка/forward, присланные боту
-  extraction/articles.py       # HTML -> основной текст
+  extraction/content.py        # RawItem -> ExtractedItem/ExtractionFailure
   extraction/documents.py      # PDF/DOCX -> текст
   normalization.py             # RawItem -> Material
   dedup/exact.py               # external id, URL и content hash
@@ -109,8 +111,12 @@ tests/
 ## Контракты данных
 
 - `SourceConfig`: `id`, `kind`, `locator`, `collector`, `enabled`, `settings`,
-  `cursor`. `collector` явно выбирает `native_rss`, `rss_bridge` или `telethon`, чтобы
-  поведение не менялось от неявной эвристики во время прогона.
+  `cursor`. `collector` явно выбирает `native_rss`, `universal_scraper`, `rss_bridge`,
+  `web_preview` или `telethon`, чтобы поведение не менялось от неявной эвристики во
+  время прогона. `id`/`source_id` — непустые строки: UUID остаётся допустимым значением,
+  но доменный контракт не связывается с выбранным storage-генератором id. `settings` —
+  JSON-объект, который каждый коннектор валидирует своей Pydantic-моделью с
+  `extra="forbid"`.
 - `InterestProfile`: `id`, `name`, `description`, `enabled`, `version`, `created_at`,
   `updated_at`, `updated_by_telegram_user_id`. `description` — непустой свободный текст
   с одной или несколькими темами; система не заставляет пользователя раскладывать его по
@@ -121,10 +127,26 @@ tests/
   без скрытого преобразования — так результат можно воспроизвести после редактирования.
 - `RawItem`: `source_id`, `external_id`, `original_url`, `published_at`, `title?`,
   `raw_text?`, `raw_html?`, `attachments[]`, `metadata`. Это максимально близкий к
-  источнику результат; неполные поля допустимы.
+  источнику результат; неполные поля допустимы. Первые четыре поля обязательны,
+  `published_at` обязан содержать timezone и при валидации приводится к UTC,
+  `metadata` допускает только JSON-значения. Для Telegram `external_id` во всех
+  транспортах — десятичный `message_id` без имени канала; уникальность всё равно
+  задаётся парой `(source_id, external_id)`.
 - `Attachment`: `kind`, `name`, `size?`, `download_ref?`, `mime_type?`. Отсутствующий
   `download_ref` у документа из RSS-Bridge — сигнал маршрутизировать источник в Telethon,
-  а не пытаться извлекать пустое вложение.
+  а не пытаться извлекать пустое вложение. В текущем batch-рантайме Telethon записывает
+  документ в выделенный временный каталог и возвращает абсолютный локальный путь как
+  `download_ref`; байты не помещаются в Pydantic-модель и БД.
+- `CollectionCursor`: строго одна из двух форм — `(published_at, external_id)` для
+  RSS/сайтов или `message_id` для Telegram независимо от его транспорта. Частично
+  заполненный или смешанный cursor невалиден.
+- `CollectionError`: `source_id`, машинный `code`, человекочитаемый `message`,
+  `external_id?`, `retryable`. Сетевые/парсинговые сбои возвращаются в batch и не
+  отменяют успешно разобранные элементы; неверная комбинация `kind`/`collector` или
+  неверные `settings` считается ошибкой конфигурации и отклоняется до I/O.
+- `CollectionBatch`: `raw_items[]`, `next_cursor?`, `errors[]`. Явный аргумент `cursor`
+  в `collect()` имеет приоритет над `SourceConfig.cursor`, что позволяет безопасно
+  повторить batch с уже загруженным снимком конфигурации; коннектор cursor не сохраняет.
 - `Material`: `id`, `source_id`, `external_id`, `original_url`, `published_at`,
   `fetched_at`, `title`, `text`, `language?`, `content_hash`, `metadata`. `text` уже
   очищен от HTML и достаточен для дедупа/LLM; пустой текст запрещён.
@@ -162,6 +184,62 @@ tests/
 `Protocol`. Для unit-тестов подставляются in-memory реализации; интеграционные тесты
 работают на зафиксированных RSS/HTML/Telegram fixtures и отдельной тестовой Postgres-БД
 (service container в CI, откат транзакции после теста).
+
+Точная граница источников асинхронна и одинакова для всех транспортов:
+
+```python
+class SourceConnector(Protocol):
+    async def collect(
+        self,
+        config: SourceConfig,
+        cursor: CollectionCursor | None = None,
+    ) -> CollectionBatch: ...
+```
+
+Реализация границы источников:
+
+- `collector` явно выбирает транспорт: `native_rss` читает feed напрямую,
+  `universal_scraper` вызывает универсальный HTTP/CSS-скрапер, `rss_bridge` — локальный
+  RSS-Bridge, `web_preview` — прямой `t.me/s/...`, `telethon` — уже аутентифицированный
+  клиент пользовательского аккаунта. Ни один коннектор не делает скрытый fallback;
+- RSS и универсальный скрапер возвращают `(published_at, external_id)` cursor; все
+  Telegram-коннекторы — `message_id`. `next_cursor` вычисляется, но его сохранение —
+  ответственность шага 11 после записи batch;
+- универсальный скрапер сначала находит detail URL по `link_selector` и регулярным
+  выражениям include/exclude, затем получает каждую статью. Заголовок и дата читаются
+  из настроенных селекторов, OpenGraph/`<time>`/JSON-LD; поддержана русская текстовая
+  дата. Полный HTML остаётся в `RawItem.raw_html`, основной текст извлекает общий
+  `ContentExtractor` через `trafilatura`;
+- RSS-коннектор по умолчанию получает полный HTML статьи. Если detail URL временно
+  недоступен (в частности, возможный 403 TAdviser), он сохраняет item с HTML-анонсом из
+  feed и добавляет retryable `article_fetch_failed`, не теряя саму новость;
+- Telegram preview разбирает только реально присутствующие `.tgme_widget_message`.
+  Пустая страница возвращает `preview_unavailable`; документ из preview сохраняется как
+  `Attachment` без выдуманного `download_ref`;
+- Telethon скачивает документы в каталог запуска, заполняет имя/размер/MIME/path, а
+  `ContentExtractor` объединяет подпись поста с текстом PDF/DOCX. PDF без текстового
+  слоя даёт типизированный failure; OCR в MVP не добавляется.
+
+### Явно рассмотренные развилки в коннекторах
+
+1. **Сайт без RSS: RSS-Bridge CssSelectorBridge или свой скрапер.** Реализован свой
+   конфигурируемый `UniversalSiteConnector`: он тестируется без Docker и не привязывает
+   модель настроек к query-параметрам RSS-Bridge. Альтернатива остаётся полезной, если
+   layout потребует headless/browser-fetch; она подключается отдельным
+   `collector=rss_bridge`, не меняя `RawItem`.
+2. **Обычный Telegram: только RSS-Bridge или прямой preview.** Оставлены оба явных
+   транспорта. RSS-Bridge предпочтителен в production ради своего cache, прямой preview
+   удобен для локальной проверки и малого числа каналов. Автоматически переключаться
+   между ними нельзя — иначе один и тот же прогон зависел бы от состояния внешнего
+   сервиса.
+3. **Вложения: байты в `RawItem`, object storage или локальная ссылка.** Для конечного
+   `pipeline-runner` выбран локальный абсолютный `download_ref`: это самый дешёвый
+   вариант, он не раздувает JSON/БД и живёт достаточно долго до шага extraction.
+   Object storage понадобится только при разделении collection/extraction на разные
+   процессы; тогда меняется резолвер `download_ref`, а не контракт `Attachment`.
+4. **`SourceConfig.id`: обязательный UUID или непрозрачная строка.** Выбрана непрозрачная
+   непустая строка, чтобы коннекторы не зависели от Postgres. Repository может выдавать
+   UUID и передавать его строковое представление без изменения протокола.
 
 ### Идемпотентность и окна
 
@@ -232,7 +310,7 @@ tests/
 - **Вложения-документы в Telegram (PDF/DOCX-отчёты)**: у части каналов (например,
   аналитика по рынку ИИ) контент лежит не в тексте поста, а во вложенном файле.
   RSS-Bridge отдаёт только имя и размер файла, не сам файл — для таких каналов нужен
-  Telethon: скачать документ и извлечь текст (PDF — `pdfplumber`/PyMuPDF, DOCX —
+  Telethon: скачать документ и извлечь текст (PDF — `pdfplumber`, DOCX —
   `python-docx`), дальше этот текст идёт в тот же фильтр релевантности и суммаризацию,
   что и обычная статья. Для длинных отчётов, возможно, понадобится отдельный промпт
   суммаризации (ключевые цифры/выводы, а не пересказ в одну строку) — решим по факту
@@ -253,7 +331,12 @@ Docker недоступен локально на Mac PO — вместо раз
   имя/размер файла, не содержимое) — для этого канала Telethon нужен не как опция для
   вложений, а как единственный рабочий способ вообще получать посты.
 - **ict.moscow/analytics** — нативного RSS нет, нужен универсальный CSS-selector-бридж
-  RSS-Bridge или свой скрапер.
+  RSS-Bridge или свой скрапер. Реализован `UniversalSiteConnector`; preset использует
+  `a[href^="/analytics/"]` плюс include/exclude URL-regex, поэтому служебные ссылки и
+  фильтры не становятся материалами. Внешняя среда разработки 31.08.2026 не дождалась
+  ответа сайта ни через browser, ни через 30-секундный HTTP-запрос; preset проверен на
+  зафиксированной реальной структуре/заголовках, а первый production-прогон должен
+  подтвердить живую разметку и при необходимости поправить только `settings`.
 - **tadviser.ru** — есть RSS: `https://www.tadviser.ru/xml/tadviser.xml` (общий по всему
   сайту, не только по ИИ) — можно читать напрямую (`feedparser`), фильтрация по теме всё
   равно идёт через шаг релевантности. Отдельно: прямой фетч этой страницы через
@@ -262,6 +345,10 @@ Docker недоступен локально на Mac PO — вместо раз
 - **issek.hse.ru/ai** — есть RSS, но общий по организации:
   `https://www.hse.ru/rss/orgs/70333/news_and_announcements.rss`, не только по серии «ИИ» —
   тоже читаем напрямую, фильтруем релевантностью.
+
+Реализация коннекторов закрепляет эти находки тестовыми fixtures: два нативных RSS,
+Atom-выдача TelegramBridge, обычный `t.me/s` preview, пустой preview `@expertosphere`,
+страница списка/detail ICT.Moscow, Telethon-документ и извлечение настоящих PDF/DOCX.
 
 ## Сверка с auto-news и RSS-Bridge (31.08.2026)
 

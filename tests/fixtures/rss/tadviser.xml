@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>TAdviser</title>
+    <link>https://www.tadviser.ru/</link>
+    <description>Новости ИТ-рынка</description>
+    <item>
+      <guid>tadviser-101</guid>
+      <title>Российский рынок искусственного интеллекта вырос</title>
+      <link>https://www.tadviser.ru/a/101</link>
+      <pubDate>Mon, 31 Aug 2026 08:15:00 +0300</pubDate>
+      <description><![CDATA[<p>Короткий анонс материала TAdviser.</p>]]></description>
+    </item>
+    <item>
+      <guid>tadviser-100</guid>
+      <title>Компании внедряют ИИ-агентов</title>
+      <link>https://www.tadviser.ru/a/100</link>
+      <pubDate>Sun, 30 Aug 2026 12:00:00 +0300</pubDate>
+      <description><![CDATA[<p>Анонс предыдущего материала.</p>]]></description>
+    </item>
+  </channel>
+</rss>

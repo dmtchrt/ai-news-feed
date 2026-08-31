@@ -1,0 +1,62 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ai-news-feed"
+version = "0.1.0"
+description = "Personal AI news feed pipeline"
+readme = "PRD.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "beautifulsoup4>=4.13,<5",
+  "feedparser>=6.0.11,<7",
+  "httpx>=0.28,<1",
+  "pdfplumber>=0.11,<1",
+  "pydantic>=2.11,<3",
+  "python-docx>=1.2,<2",
+  "telethon>=1.40,<2",
+  "trafilatura>=2.0,<3",
+]
+
+[dependency-groups]
+dev = [
+  "mypy>=1.17,<2",
+  "pytest>=8.4,<9",
+  "pytest-asyncio>=1.1,<2",
+  "reportlab>=4.4,<5",
+  "ruff>=0.12,<1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ai_news_feed"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC", "RUF"]
+ignore = ["RUF001"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/ai_news_feed/sources/telegram.py" = ["ASYNC240"]
+"tests/**/*.py" = ["ASYNC240"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+packages = ["ai_news_feed"]
+
+[[tool.mypy.overrides]]
+module = "feedparser"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "reportlab.*"
+ignore_missing_imports = true

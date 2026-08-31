@@ -1,13 +1,19 @@
 # Python
 __pycache__/
-*.pyc
+*.py[cod]
 .venv/
 venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 
 # Secrets / local config
 .env
 *.env
 config.local.*
+telegram-session*.session*
 
 # Data
 *.db
