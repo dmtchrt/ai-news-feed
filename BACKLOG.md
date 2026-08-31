@@ -50,14 +50,20 @@ _27.08.2026_
       исходники.
 
 ## 4. Backend/инфраструктура
-- [ ] Postgres-схема (источники — с уникальным id и защитой от дублей, интересы,
-      материалы, кластеры, оценка релевантности, отправленные дайджесты) + миграции
-      Alembic; доступ через `PostgresRepository` на SQLAlchemy Core/psycopg 3.
+- [ ] Создать отдельный Neon-проект AI News Feed (Postgres 18, TLS, собственные
+      project/database/role/`DATABASE_URL`, без общей БД или schema с `rus-ai.com`) и
+      Postgres-схему: источники с уникальным id/защитой от дублей, интересы, материалы,
+      кластеры, оценка релевантности, отправленные дайджесты. Миграции — Alembic, доступ —
+      `PostgresRepository` на SQLAlchemy Core/psycopg 3.
 - [ ] Постоянный bot-worker с непрерывным long polling: управление источниками в личке
       («Добавить источник» / «Посмотреть все источники» / «Удалить источник», проверка
       дублей) и просмотр/редактирование `InterestProfile` через Postgres (см.
       ARCHITECTURE.md).
-- [ ] GitHub Actions workflow: расписание + запуск пайплайна.
+- [ ] Развернуть bot-worker на VPS отдельным systemd-unit: собственный venv и каталог,
+      `Restart=always`, автозапуск после reboot, отдельный environment-файл и отдельный
+      непривилегированный OS-пользователь. Не менять unit/Nginx/venv `rus-ai.com`.
+- [ ] GitHub Actions workflow: расписание + запуск pipeline-runner только на GitHub runner,
+      с подключением к отдельному Neon-проекту; pipeline-runner на VPS не переносить.
 - [ ] Отправка дайджеста в Telegram-канал через Bot API (бот — админ канала).
 
 ## 5. Ревьюер
