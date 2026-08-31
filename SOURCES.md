@@ -29,6 +29,7 @@ _27.08.2026_
 ★ @ICT_Moscow — тема 2
 ★ @airi_research_institute — тема 1/2
 ★ @ailev_blog — тема 1
+★ @naebnet — по запросу PO
 - @tedo_business
 - @StrategyPartners
 - @AgencySmartRanking
@@ -39,7 +40,6 @@ _27.08.2026_
 - @ict_moscow_ai
 - @bukvamiocifre
 - @seeallochnaya
-- @naebnet
 - @gpt4_tg
 - @TochkiNadAI
 - @gpt_news
@@ -56,4 +56,4 @@ _27.08.2026_
 - @novgorodskayaobl
 
 Примечание: в исходном списке @ict_moscow_ai был указан дважды (пункты 11 и 24) —
-здесь оставлен один раз.
+здесь оставлен один раз. Набор ★ для первого теста подтверждён PO 27.08.2026.
