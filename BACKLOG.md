@@ -80,10 +80,17 @@ _27.08.2026_
       непривилегированный OS-пользователь. Не менять unit/Nginx/venv `rus-ai.com`.
 - [x] GitHub Actions workflow: расписание + запуск pipeline-runner только на GitHub runner,
       с подключением к отдельному Neon-проекту; pipeline-runner на VPS не переносить.
-- [ ] PO: создать репозиторий на GitHub и запушить `main` — сейчас у локального
-      репозитория нет `remote`, поэтому ни секреты, ни workflow_dispatch недоступны.
-- [ ] PO: добавить GitHub Actions secrets и проверить `workflow_dispatch` после merge в
-      `main` (без секретов cron ожидаемо не может пройти).
+- [x] PO: создать репозиторий на GitHub и запушить `main` — готово 01.09.2026,
+      github.com/dmtchrt/ai-news-feed.
+- [x] PO: добавить все 9 GitHub Actions secrets (DATABASE_URL, TELEGRAM_BOT_TOKEN,
+      TELEGRAM_CHANNEL_ID, OPENAI_API_KEY, OPENAI_SCREENING_MODEL/OPENAI_SUMMARY_MODEL,
+      TELEGRAM_API_ID/API_HASH/SESSION) — готово 01.09.2026.
+- [ ] PO: добавить хотя бы один источник и задать InterestProfile через bot-worker
+      (локально, командой из ARCHITECTURE.md/чата, до VPS-деплоя) — без этого
+      `interest_profile_id="default"` не существует, и pipeline-runner упадёт с
+      `LookupError` на первом же прогоне независимо от секретов.
+- [ ] PO: проверить первый `workflow_dispatch` после merge в `main` — только после
+      предыдущего пункта.
 - [x] Отправка дайджеста в Telegram-канал через Bot API (бот — админ канала), с
       детерминированным разбиением по лимиту и checkpoint на каждую часть.
 
