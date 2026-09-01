@@ -19,7 +19,7 @@ dependencies = [
   "python-docx>=1.2,<2",
   "python-telegram-bot>=22,<23",
   "semhash>=0.4.1,<0.5",
-  "sqlalchemy>=2.0.43,<3",
+  "sqlalchemy[asyncio]>=2.0.43,<3",
   "telethon>=1.40,<2",
   "trafilatura>=2.0,<3",
 ]
