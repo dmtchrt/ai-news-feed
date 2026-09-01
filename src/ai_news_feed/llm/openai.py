@@ -14,11 +14,46 @@ class OpenAIResponseError(RuntimeError):
     pass
 
 
+class _ResponseContentPart(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    type: str = Field(min_length=1)
+    text: str | None = None
+    refusal: str | None = None
+
+
+class _ResponseOutputItem(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    type: str = Field(min_length=1)
+    content: tuple[_ResponseContentPart, ...] = ()
+
+
 class _ResponsesPayload(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     model: str = Field(min_length=1)
-    output_text: str = Field(min_length=1)
+    output: tuple[_ResponseOutputItem, ...]
+
+
+def _extract_output_text(payload: _ResponsesPayload) -> str:
+    text_parts: list[str] = []
+    refusals: list[str] = []
+
+    for item in payload.output:
+        if item.type != "message":
+            continue
+        for part in item.content:
+            if part.type == "output_text" and part.text:
+                text_parts.append(part.text)
+            elif part.type == "refusal":
+                refusals.append(part.refusal or "no refusal reason provided")
+
+    if refusals:
+        raise OpenAIResponseError(f"Responses API model refusal: {'; '.join(refusals)}")
+    if not text_parts:
+        raise OpenAIResponseError("Responses API returned no output_text content in a message")
+    return "".join(text_parts)
 
 
 class OpenAIResponsesClient:
@@ -91,5 +126,5 @@ class OpenAIResponsesClient:
         try:
             parsed = _ResponsesPayload.model_validate(response.json())
         except (ValueError, TypeError) as exc:
-            raise OpenAIResponseError("Responses API returned no structured output_text") from exc
-        return LLMResponse(text=parsed.output_text, model=parsed.model)
+            raise OpenAIResponseError("Responses API returned an invalid payload") from exc
+        return LLMResponse(text=_extract_output_text(parsed), model=parsed.model)
