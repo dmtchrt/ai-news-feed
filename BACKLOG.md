@@ -62,9 +62,10 @@ _27.08.2026_
       Postgres не является блокером AI/ML-среза.
 
 ## 4. Backend/инфраструктура
-- [ ] PO: создать отдельный Neon-проект AI News Feed (Postgres 18, TLS, собственные
+- [x] PO: создать отдельный Neon-проект AI News Feed (Postgres 18, TLS, собственные
       project/database/role/`DATABASE_URL`, без общей БД или schema с `rus-ai.com`) и
-      вручную применить миграции.
+      вручную применить миграции — готово 01.09.2026, `alembic upgrade head` применил
+      единственную миграцию `20260831_01` без ошибок.
 - [x] Postgres-схема источников/интересов/материалов/кластеров/duplicate links/оценок/
       дайджестов, Alembic и общий async `PostgresRepository` на SQLAlchemy Core/psycopg 3;
       интеграционный Postgres 18 поднимается service container-ом только в CI.
@@ -79,6 +80,8 @@ _27.08.2026_
       непривилегированный OS-пользователь. Не менять unit/Nginx/venv `rus-ai.com`.
 - [x] GitHub Actions workflow: расписание + запуск pipeline-runner только на GitHub runner,
       с подключением к отдельному Neon-проекту; pipeline-runner на VPS не переносить.
+- [ ] PO: создать репозиторий на GitHub и запушить `main` — сейчас у локального
+      репозитория нет `remote`, поэтому ни секреты, ни workflow_dispatch недоступны.
 - [ ] PO: добавить GitHub Actions secrets и проверить `workflow_dispatch` после merge в
       `main` (без секретов cron ожидаемо не может пройти).
 - [x] Отправка дайджеста в Telegram-канал через Bot API (бот — админ канала), с
