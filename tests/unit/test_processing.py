@@ -114,3 +114,67 @@ async def test_ai_processor_does_not_summarize_rejected_cluster() -> None:
 
     assert not result.digest_items
     assert len(llm.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_ai_processor_drops_items_older_than_freshness_window() -> None:
+    now = datetime(2026, 8, 31, 8, tzinfo=UTC)
+    profile = InterestProfile(
+        id="default",
+        name="Интересы v1",
+        description="ИИ-агенты",
+        created_at=now,
+        updated_at=now,
+        freshness_days=7,
+    )
+    llm = _QueuedLLM()
+    processor = AIProcessor(
+        repository=InMemoryRepository(interest_profiles=[profile]),
+        semantic_clusterer=SemanticClusterer(encoder=_ConstantEncoder()),
+        screener=ClusterScreener(llm),
+        summarizer=ClusterSummarizer(llm),
+    )
+    old_item = ExtractedRawItem(
+        _raw("old", "1").model_copy(update={"published_at": datetime(2022, 1, 1, tzinfo=UTC)}),
+        ExtractedItem(text="Старая новость про ИИ-агентов, за пределами окна свежести."),
+    )
+
+    result = await processor.process([old_item], interest_profile_id="default", now=now)
+
+    assert not result.materials
+    assert not result.digest_items
+    assert llm.requests == []
+
+
+@pytest.mark.asyncio
+async def test_ai_processor_min_published_at_overrides_profile_freshness_for_backfill() -> None:
+    now = datetime(2026, 8, 31, 8, tzinfo=UTC)
+    profile = InterestProfile(
+        id="default",
+        name="Интересы v1",
+        description="ИИ-агенты",
+        created_at=now,
+        updated_at=now,
+        freshness_days=7,
+    )
+    llm = _QueuedLLM()
+    processor = AIProcessor(
+        repository=InMemoryRepository(interest_profiles=[profile]),
+        semantic_clusterer=SemanticClusterer(encoder=_ConstantEncoder()),
+        screener=ClusterScreener(llm),
+        summarizer=ClusterSummarizer(llm),
+    )
+    old_item = ExtractedRawItem(
+        _raw("old", "1").model_copy(update={"published_at": datetime(2022, 1, 1, tzinfo=UTC)}),
+        ExtractedItem(text="Старая новость про ИИ-агентов, но это разовый backfill."),
+    )
+
+    result = await processor.process(
+        [old_item],
+        interest_profile_id="default",
+        now=now,
+        min_published_at=datetime(2020, 1, 1, tzinfo=UTC),
+    )
+
+    assert len(result.materials) == 1
+    assert len(result.digest_items) == 1

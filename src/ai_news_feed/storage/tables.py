@@ -22,7 +22,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import JSONB
 
-from ai_news_feed.domain.models import CollectorKind, DuplicateKind, SourceKind
+from ai_news_feed.domain.models import CollectorKind, DuplicateKind, SourceKind, SummaryLength
 
 NAMING_CONVENTION = {
     "ix": "ix_%(table_name)s_%(column_0_name)s",
@@ -35,7 +35,8 @@ metadata = MetaData(naming_convention=NAMING_CONVENTION)
 
 
 def _enum(
-    enum_class: type[SourceKind] | type[CollectorKind] | type[DuplicateKind], name: str
+    enum_class: type[SourceKind] | type[CollectorKind] | type[DuplicateKind] | type[SummaryLength],
+    name: str,
 ) -> Enum:
     return Enum(
         enum_class,
@@ -71,12 +72,27 @@ interest_profiles = Table(
     Column("description", Text, nullable=False),
     Column("enabled", Boolean, nullable=False, server_default="true"),
     Column("version", Integer, nullable=False, server_default="1"),
+    Column("freshness_days", Integer, nullable=False, server_default="7"),
+    Column(
+        "summary_length",
+        _enum(SummaryLength, "summary_length"),
+        nullable=False,
+        server_default=SummaryLength.NORMAL.value,
+    ),
+    Column("tone_instructions", Text),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     Column("updated_by_telegram_user_id", BigInteger),
     CheckConstraint("btrim(name) <> ''", name="interest_name_not_blank"),
     CheckConstraint("btrim(description) <> ''", name="interest_description_not_blank"),
     CheckConstraint("version >= 1", name="interest_version_positive"),
+    CheckConstraint(
+        "freshness_days BETWEEN 1 AND 365", name="interest_freshness_days_range"
+    ),
+    CheckConstraint(
+        "tone_instructions IS NULL OR btrim(tone_instructions) <> ''",
+        name="interest_tone_instructions_not_blank",
+    ),
     CheckConstraint(
         "updated_by_telegram_user_id IS NULL OR updated_by_telegram_user_id > 0",
         name="interest_telegram_user_positive",

@@ -15,6 +15,7 @@ from ai_news_feed.domain.models import (
     NewsCluster,
     ScreeningResult,
     SourceConfig,
+    SummaryLength,
 )
 from ai_news_feed.sources.locator import normalize_source_locator
 from ai_news_feed.storage.base import (
@@ -127,6 +128,80 @@ class InMemoryRepository:
             update={
                 "name": name or profile.name,
                 "description": description,
+                "version": profile.version + 1,
+                "updated_at": datetime.now(UTC),
+                "updated_by_telegram_user_id": updated_by_telegram_user_id,
+            }
+        )
+        updated = InterestProfile.model_validate(updated)
+        self._profiles[profile_id] = updated
+        return updated
+
+    async def update_digest_freshness(
+        self,
+        profile_id: str,
+        *,
+        freshness_days: int,
+        expected_version: int,
+        updated_by_telegram_user_id: int | None,
+    ) -> InterestProfile:
+        return self._cas_update_profile(
+            profile_id,
+            expected_version=expected_version,
+            updated_by_telegram_user_id=updated_by_telegram_user_id,
+            update={"freshness_days": freshness_days},
+        )
+
+    async def update_digest_length(
+        self,
+        profile_id: str,
+        *,
+        summary_length: SummaryLength,
+        expected_version: int,
+        updated_by_telegram_user_id: int | None,
+    ) -> InterestProfile:
+        return self._cas_update_profile(
+            profile_id,
+            expected_version=expected_version,
+            updated_by_telegram_user_id=updated_by_telegram_user_id,
+            update={"summary_length": summary_length},
+        )
+
+    async def update_digest_tone(
+        self,
+        profile_id: str,
+        *,
+        tone_instructions: str | None,
+        expected_version: int,
+        updated_by_telegram_user_id: int | None,
+    ) -> InterestProfile:
+        return self._cas_update_profile(
+            profile_id,
+            expected_version=expected_version,
+            updated_by_telegram_user_id=updated_by_telegram_user_id,
+            update={"tone_instructions": tone_instructions.strip() if tone_instructions else None},
+        )
+
+    def _cas_update_profile(
+        self,
+        profile_id: str,
+        *,
+        expected_version: int,
+        updated_by_telegram_user_id: int | None,
+        update: dict[str, object],
+    ) -> InterestProfile:
+        try:
+            profile = self._profiles[profile_id]
+        except KeyError as exc:
+            raise LookupError(f"interest profile not found: {profile_id}") from exc
+        if profile.version != expected_version:
+            raise ConcurrentUpdateError(
+                f"interest profile {profile_id} changed from version {expected_version} "
+                f"to {profile.version}"
+            )
+        updated = profile.model_copy(
+            update={
+                **update,
                 "version": profile.version + 1,
                 "updated_at": datetime.now(UTC),
                 "updated_by_telegram_user_id": updated_by_telegram_user_id,

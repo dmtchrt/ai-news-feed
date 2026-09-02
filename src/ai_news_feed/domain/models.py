@@ -29,6 +29,14 @@ class CollectorKind(StrEnum):
     UNIVERSAL_SCRAPER = "universal_scraper"
 
 
+class SummaryLength(StrEnum):
+    """Digest summary length preset (see ClusterSummarizer)."""
+
+    BRIEF = "brief"
+    NORMAL = "normal"
+    DETAILED = "detailed"
+
+
 class AttachmentKind(StrEnum):
     DOCUMENT = "document"
     IMAGE = "image"
@@ -161,6 +169,9 @@ class InterestProfile(ContractModel):
     description: str = Field(min_length=1)
     enabled: bool = True
     version: int = Field(default=1, ge=1)
+    freshness_days: int = Field(default=7, ge=1, le=365)
+    summary_length: SummaryLength = SummaryLength.NORMAL
+    tone_instructions: str | None = None
     created_at: datetime
     updated_at: datetime
     updated_by_telegram_user_id: int | None = Field(default=None, ge=1)
@@ -172,6 +183,14 @@ class InterestProfile(ContractModel):
         if not stripped:
             raise ValueError("profile text must not be blank")
         return stripped
+
+    @field_validator("tone_instructions")
+    @classmethod
+    def tone_instructions_is_stripped(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        return stripped or None
 
     @field_validator("created_at", "updated_at")
     @classmethod

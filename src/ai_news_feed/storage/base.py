@@ -17,6 +17,7 @@ from ai_news_feed.domain.models import (
     NewsCluster,
     ScreeningResult,
     SourceConfig,
+    SummaryLength,
 )
 
 
@@ -68,6 +69,33 @@ class Repository(Protocol):
         expected_version: int,
         updated_by_telegram_user_id: int | None,
         name: str | None = None,
+    ) -> InterestProfile: ...
+
+    async def update_digest_freshness(
+        self,
+        profile_id: str,
+        *,
+        freshness_days: int,
+        expected_version: int,
+        updated_by_telegram_user_id: int | None,
+    ) -> InterestProfile: ...
+
+    async def update_digest_length(
+        self,
+        profile_id: str,
+        *,
+        summary_length: SummaryLength,
+        expected_version: int,
+        updated_by_telegram_user_id: int | None,
+    ) -> InterestProfile: ...
+
+    async def update_digest_tone(
+        self,
+        profile_id: str,
+        *,
+        tone_instructions: str | None,
+        expected_version: int,
+        updated_by_telegram_user_id: int | None,
     ) -> InterestProfile: ...
 
     async def find_materials_by_content_hashes(

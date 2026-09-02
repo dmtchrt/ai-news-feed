@@ -27,6 +27,7 @@ from ai_news_feed.domain.models import (
     ScreeningResult,
     SourceConfig,
     SourceKind,
+    SummaryLength,
 )
 from ai_news_feed.sources.locator import normalize_source_locator
 from ai_news_feed.storage.base import (
@@ -274,6 +275,94 @@ class PostgresRepository:
                             )
                         )
                         .values(**values)
+                        .returning(interest_profiles)
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if row is None:
+                actual = await connection.scalar(
+                    select(interest_profiles.c.version).where(interest_profiles.c.id == profile_id)
+                )
+                if actual is None:
+                    raise LookupError(f"interest profile not found: {profile_id}")
+                raise ConcurrentUpdateError(
+                    f"interest profile {profile_id} changed from version {expected_version} "
+                    f"to {actual}"
+                )
+        return _profile_from_row(row)
+
+    async def update_digest_freshness(
+        self,
+        profile_id: str,
+        *,
+        freshness_days: int,
+        expected_version: int,
+        updated_by_telegram_user_id: int | None,
+    ) -> InterestProfile:
+        return await self._cas_update_profile(
+            profile_id,
+            values={"freshness_days": freshness_days},
+            expected_version=expected_version,
+            updated_by_telegram_user_id=updated_by_telegram_user_id,
+        )
+
+    async def update_digest_length(
+        self,
+        profile_id: str,
+        *,
+        summary_length: SummaryLength,
+        expected_version: int,
+        updated_by_telegram_user_id: int | None,
+    ) -> InterestProfile:
+        return await self._cas_update_profile(
+            profile_id,
+            values={"summary_length": summary_length.value},
+            expected_version=expected_version,
+            updated_by_telegram_user_id=updated_by_telegram_user_id,
+        )
+
+    async def update_digest_tone(
+        self,
+        profile_id: str,
+        *,
+        tone_instructions: str | None,
+        expected_version: int,
+        updated_by_telegram_user_id: int | None,
+    ) -> InterestProfile:
+        return await self._cas_update_profile(
+            profile_id,
+            values={"tone_instructions": tone_instructions.strip() if tone_instructions else None},
+            expected_version=expected_version,
+            updated_by_telegram_user_id=updated_by_telegram_user_id,
+        )
+
+    async def _cas_update_profile(
+        self,
+        profile_id: str,
+        *,
+        values: dict[str, Any],
+        expected_version: int,
+        updated_by_telegram_user_id: int | None,
+    ) -> InterestProfile:
+        async with self._engine.begin() as connection:
+            row = (
+                (
+                    await connection.execute(
+                        update(interest_profiles)
+                        .where(
+                            and_(
+                                interest_profiles.c.id == profile_id,
+                                interest_profiles.c.version == expected_version,
+                            )
+                        )
+                        .values(
+                            **values,
+                            version=interest_profiles.c.version + 1,
+                            updated_at=func.now(),
+                            updated_by_telegram_user_id=updated_by_telegram_user_id,
+                        )
                         .returning(interest_profiles)
                     )
                 )
@@ -689,6 +778,9 @@ def _profile_from_row(row: RowMapping) -> InterestProfile:
         description=str(row["description"]),
         enabled=bool(row["enabled"]),
         version=int(row["version"]),
+        freshness_days=int(row["freshness_days"]),
+        summary_length=SummaryLength(row["summary_length"]),
+        tone_instructions=row["tone_instructions"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         updated_by_telegram_user_id=row["updated_by_telegram_user_id"],

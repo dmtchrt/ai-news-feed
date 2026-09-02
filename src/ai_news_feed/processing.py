@@ -74,24 +74,40 @@ class AIProcessor:
         interest_profile_id: str,
         interest_profile: InterestProfile | None = None,
         now: datetime | None = None,
+        min_published_at: datetime | None = None,
     ) -> AIProcessingResult:
         run_time = now or datetime.now(UTC)
         if run_time.tzinfo is None or run_time.utcoffset() is None:
             raise ValueError("now must be timezone-aware")
         run_time = run_time.astimezone(UTC)
+        if min_published_at is not None:
+            if min_published_at.tzinfo is None or min_published_at.utcoffset() is None:
+                raise ValueError("min_published_at must be timezone-aware")
+            min_published_at = min_published_at.astimezone(UTC)
         profile = interest_profile or await self.repository.get_interest_profile(
             interest_profile_id
         )
         if profile.id != interest_profile_id:
             raise ValueError("interest_profile id does not match interest_profile_id")
 
+        # Freshness cutoff: skip anything published before it so old backlog items never
+        # reach dedup/clustering/LLM screening. A caller can widen this explicitly (the
+        # on-demand "collect for period" bot action) via min_published_at; the standing
+        # scheduled run always uses the profile's own freshness_days setting.
+        freshness_cutoff = min_published_at or (
+            run_time - timedelta(days=profile.freshness_days)
+        )
         materials = tuple(
-            self.normalizer.normalize(
-                item.raw_item,
-                item.extracted_item,
-                fetched_at=run_time,
+            material
+            for material in (
+                self.normalizer.normalize(
+                    item.raw_item,
+                    item.extracted_item,
+                    fetched_at=run_time,
+                )
+                for item in items
             )
-            for item in items
+            if material.published_at >= freshness_cutoff
         )
         existing_ids = {
             material.id
@@ -127,7 +143,14 @@ class AIProcessor:
             )
             screenings.append(screening)
             if self.screening_thresholds.accepts(screening):
-                digest_items.append(await self.summarizer.summarize(cluster, cluster_materials))
+                digest_items.append(
+                    await self.summarizer.summarize(
+                        cluster,
+                        cluster_materials,
+                        summary_length=profile.summary_length,
+                        tone_instructions=profile.tone_instructions,
+                    )
+                )
 
         return AIProcessingResult(
             materials=new_materials,
