@@ -48,3 +48,19 @@ async def test_universal_scraper_returns_typed_error_when_layout_changes() -> No
 
     assert batch.raw_items == ()
     assert batch.errors[0].code == "selector_empty"
+
+
+@pytest.mark.asyncio
+async def test_listing_fetch_error_with_empty_str_still_yields_valid_error() -> None:
+    """Regression: same empty-message hazard as rss.py, for the listing-page fetch."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        batch = await UniversalSiteConnector(client).collect(ict_moscow_source())
+
+    assert batch.raw_items == ()
+    assert len(batch.errors) == 1
+    assert batch.errors[0].code == "listing_fetch_failed"
+    assert batch.errors[0].message == "ConnectError"

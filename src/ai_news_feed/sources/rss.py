@@ -27,6 +27,7 @@ from ai_news_feed.sources._shared import (
     DEFAULT_USER_AGENT,
     canonical_absolute_url,
     effective_cursor,
+    error_message,
     fallback_external_id,
     is_after_rss_cursor,
     next_rss_cursor,
@@ -123,7 +124,7 @@ class _RssCollector:
                     CollectionError(
                         source_id=config.id,
                         code="feed_fetch_failed",
-                        message=str(exc),
+                        message=error_message(exc),
                         retryable=True,
                     ),
                 ),
@@ -162,7 +163,7 @@ class _RssCollector:
                     CollectionError(
                         source_id=config.id,
                         code="entry_invalid",
-                        message=str(exc),
+                        message=error_message(exc),
                         external_id=_optional_string(entry.get("id")),
                         retryable=False,
                     )
@@ -230,7 +231,7 @@ class _RssCollector:
                     CollectionError(
                         source_id=config.id,
                         code="article_fetch_failed",
-                        message=str(exc),
+                        message=error_message(exc),
                         external_id=external_id,
                         retryable=True,
                     )

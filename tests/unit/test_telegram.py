@@ -159,3 +159,50 @@ async def test_telethon_downloads_expertosphere_docx_and_extractor_reads_it(
     assert isinstance(extracted, ExtractedItem)
     assert "Новый отраслевой отчёт" in extracted.text
     assert "Объём рынка вырос" in extracted.text
+
+
+class _FailingDownloadTelethonClient:
+    def __init__(self, messages: list[_FakeMessage]) -> None:
+        self.messages = messages
+
+    def iter_messages(self, handle: str, **kwargs: Any) -> _AsyncMessages:
+        min_id = int(kwargs["min_id"])
+        return _AsyncMessages([message for message in self.messages if message.id > min_id])
+
+    async def download_media(self, message: _FakeMessage, file: str) -> str:
+        # A bare TimeoutError() (== asyncio.TimeoutError since Python 3.11) stringifies
+        # to "" -- exactly the shape of error Telethon/httpx can raise on a slow download.
+        raise TimeoutError
+
+
+@pytest.mark.asyncio
+async def test_attachment_download_error_with_empty_str_still_yields_valid_error(
+    tmp_path: Path,
+) -> None:
+    """Regression: CollectionError.message requires >=1 character, but str(exc) on a
+    bare TimeoutError is "". A failed download must still produce a valid batch --
+    with the message text still delivered, just without a download reference --
+    instead of raising a secondary pydantic ValidationError that aborts collection
+    for every remaining source in that run (see sources/_shared.py:error_message)."""
+    message = _FakeMessage(
+        id=502,
+        date=datetime(2026, 8, 31, 7, 0, tzinfo=UTC),
+        message="Ещё один отчёт",
+        document=object(),
+        file=_FakeFile(
+            name="report.docx",
+            mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            size=12345,
+            ext=".docx",
+        ),
+    )
+    client = _FailingDownloadTelethonClient([message])
+    connector = TelethonConnector(client, download_dir=tmp_path / "downloads")
+    batch = await connector.collect(expertosphere_source(), CollectionCursor(message_id=500))
+
+    assert batch.next_cursor == CollectionCursor(message_id=502)
+    assert len(batch.errors) == 1
+    assert batch.errors[0].code == "attachment_download_failed"
+    assert batch.errors[0].message == "TimeoutError"
+    assert "Ещё один отчёт" in (batch.raw_items[0].raw_text or "")
+    assert batch.raw_items[0].attachments[0].download_ref is None

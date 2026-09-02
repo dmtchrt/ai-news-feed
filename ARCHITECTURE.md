@@ -151,6 +151,13 @@ tests/
   `external_id?`, `retryable`. Сетевые/парсинговые сбои возвращаются в batch и не
   отменяют успешно разобранные элементы; неверная комбинация `kind`/`collector` или
   неверные `settings` считается ошибкой конфигурации и отклоняется до I/O.
+  `message` требует минимум 1 символ; коннекторы формируют его через
+  `error_message()` (`sources/_shared.py`), а не
+  голым `str(exc)` -- у части исключений (`TimeoutError`/`asyncio.TimeoutError` без
+  аргументов, отдельные внутренние ошибки httpx/Telethon) `str(exc) == ''`, а это
+  роняет саму конструкцию `CollectionError` вторичной `pydantic.ValidationError` и
+  прерывает весь `run()`/`run_backfill()` вместо одной ошибки по одному источнику
+  (найдено на живом месячном backfill 02.09.2026).
 - `CollectionBatch`: `raw_items[]`, `next_cursor?`, `errors[]`. Явный аргумент `cursor`
   в `collect()` имеет приоритет над `SourceConfig.cursor`, что позволяет безопасно
   повторить batch с уже загруженным снимком конфигурации; коннектор cursor не сохраняет.

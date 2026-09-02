@@ -102,3 +102,22 @@ async def test_rss_bridge_builds_telegram_feed_request(fixture_dir: Path) -> Non
     assert batch.raw_items[0].external_id == "9001"
     assert batch.next_cursor == CollectionCursor(message_id=9001)
     assert "Полный текст поста" in (batch.raw_items[0].raw_html or "")
+
+
+@pytest.mark.asyncio
+async def test_feed_fetch_error_with_empty_str_still_yields_valid_error() -> None:
+    """Regression: some httpx errors (e.g. a bare timeout) stringify to "" -- the
+    connector must not let that reach CollectionError.message, which requires
+    at least 1 character (see sources/_shared.py:error_message)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        connector = NativeRssConnector(client)
+        batch = await connector.collect(tadviser_source())
+
+    assert batch.raw_items == ()
+    assert len(batch.errors) == 1
+    assert batch.errors[0].code == "feed_fetch_failed"
+    assert batch.errors[0].message == "ConnectError"

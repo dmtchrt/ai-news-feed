@@ -28,6 +28,7 @@ from ai_news_feed.domain.models import (
 from ai_news_feed.sources._shared import (
     DEFAULT_USER_AGENT,
     effective_cursor,
+    error_message,
     first_line,
     safe_filename,
     utc_datetime,
@@ -110,7 +111,7 @@ class TelegramWebPreviewConnector:
                     CollectionError(
                         source_id=config.id,
                         code="preview_fetch_failed",
-                        message=str(exc),
+                        message=error_message(exc),
                         retryable=True,
                     ),
                 ),
@@ -146,7 +147,7 @@ class TelegramWebPreviewConnector:
                     CollectionError(
                         source_id=config.id,
                         code="preview_post_invalid",
-                        message=str(exc),
+                        message=error_message(exc),
                         external_id=str(data_post) if data_post else None,
                         retryable=False,
                     )
@@ -291,7 +292,7 @@ class TelethonConnector:
                     CollectionError(
                         source_id=config.id,
                         code="attachment_download_failed",
-                        message=str(exc),
+                        message=error_message(exc),
                         external_id=str(message.id),
                         retryable=True,
                     )

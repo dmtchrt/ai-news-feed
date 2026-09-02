@@ -21,6 +21,18 @@ def effective_cursor(
     return explicit_cursor if explicit_cursor is not None else config.cursor
 
 
+def error_message(exc: BaseException) -> str:
+    """Render an exception for CollectionError.message, which requires >=1 char.
+
+    str(exc) alone is not safe: a bare TimeoutError/asyncio.TimeoutError (raised
+    with no arguments) and a few httpx/Telethon internals stringify to "". Falling
+    back to the exception's class name keeps the message non-empty without hiding
+    what actually failed.
+    """
+    text = str(exc).strip()
+    return text if text else type(exc).__name__
+
+
 def utc_datetime(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         return value.replace(tzinfo=UTC)
