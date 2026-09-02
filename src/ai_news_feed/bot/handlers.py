@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Protocol
 from uuid import uuid4
 
-from ai_news_feed.domain.models import InterestProfile, SourceConfig
+from ai_news_feed.domain.models import InterestProfile, SourceConfig, SummaryLength
 from ai_news_feed.sources.locator import parse_source_locator
 from ai_news_feed.storage.base import ConcurrentUpdateError, DuplicateSourceError, Repository
 
@@ -18,6 +19,34 @@ DELETE_SOURCE = "menu:delete-source"
 VIEW_INTERESTS = "interests:view"
 EDIT_INTERESTS = "interests:edit"
 DELETE_SOURCE_PREFIX = "source:delete:"
+DIGEST_SETTINGS = "menu:digest-settings"
+EDIT_FRESHNESS = "digest:edit-freshness"
+EDIT_LENGTH = "digest:edit-length"
+SET_LENGTH_PREFIX = "digest:set-length:"
+EDIT_TONE = "digest:edit-tone"
+BACKFILL_MENU = "backfill:menu"
+BACKFILL_PREFIX = "backfill:run:"
+
+logger = logging.getLogger(__name__)
+
+_LENGTH_LABELS: dict[SummaryLength, str] = {
+    SummaryLength.BRIEF: "Кратко",
+    SummaryLength.NORMAL: "Нормально",
+    SummaryLength.DETAILED: "Подробно",
+}
+_TONE_RESET = "-"
+_NO_PROFILE_YET = "Сначала задайте интересы — без них не с чем связывать настройки дайджеста."
+_BACKFILL_NOT_CONFIGURED = (
+    "Сбор за период недоступен: бот запущен без настроек пайплайна "
+    "(OpenAI/канал/Telethon). Обратитесь к администратору бота."
+)
+_EPOCH_FLOOR = datetime(2000, 1, 1, tzinfo=UTC)
+_BACKFILL_PERIODS: dict[str, tuple[str, int | None]] = {
+    "week": ("неделю", 7),
+    "month": ("месяц", 30),
+    "year": ("год", 365),
+    "all": ("всё время", None),
+}
 
 
 @dataclass(frozen=True)
@@ -39,9 +68,27 @@ class BotAPI(Protocol):
     ) -> None: ...
 
 
+class BackfillReport(Protocol):
+    """Structurally matches orchestration.pipeline.PipelineRunReport, without importing it
+    (that module pulls in OpenAI/Telethon/python-telegram-bot at module scope; handlers.py
+    stays limited to storage + domain models so its own tests stay dependency-light).
+    """
+
+    collected_items: int
+    extraction_failures: int
+    stored_materials: int
+    digest_posts: int
+
+
+class BackfillRunner(Protocol):
+    async def run_backfill(self, *, min_published_at: datetime) -> BackfillReport: ...
+
+
 class PendingAction(StrEnum):
     ADD_SOURCE = "add_source"
     EDIT_INTERESTS = "edit_interests"
+    EDIT_FRESHNESS = "edit_freshness"
+    EDIT_TONE = "edit_tone"
 
 
 @dataclass(frozen=True)
@@ -58,6 +105,7 @@ class BotWorkerHandlers:
         api: BotAPI,
         owner_user_id: int,
         interest_profile_id: str = "default",
+        backfill: BackfillRunner | None = None,
     ) -> None:
         if owner_user_id < 1:
             raise ValueError("owner_user_id must be positive")
@@ -65,6 +113,7 @@ class BotWorkerHandlers:
         self._api = api
         self._owner_user_id = owner_user_id
         self._profile_id = interest_profile_id
+        self._backfill = backfill
         self._pending: dict[tuple[int, int], _PendingState] = {}
 
     async def handle_start(self, *, chat_id: int, user_id: int) -> None:
@@ -112,6 +161,50 @@ class BotWorkerHandlers:
                 chat_id,
                 "Пришлите новый текст интересов одним сообщением.",
             )
+        elif data == DIGEST_SETTINGS:
+            await self._send_digest_settings(chat_id)
+        elif data == EDIT_FRESHNESS:
+            freshness_version = await self._current_profile_version()
+            if freshness_version is None:
+                await self._api.send_message(chat_id, _NO_PROFILE_YET, buttons=_main_menu())
+            else:
+                self._pending[key] = _PendingState(
+                    PendingAction.EDIT_FRESHNESS,
+                    expected_profile_version=freshness_version,
+                )
+                await self._api.send_message(
+                    chat_id,
+                    "Пришлите число дней (1-365): не показывать в дайджесте новости старше этого.",
+                )
+        elif data == EDIT_LENGTH:
+            await self._api.send_message(
+                chat_id,
+                "Выберите длину саммари:",
+                buttons=tuple(
+                    (Button(label, f"{SET_LENGTH_PREFIX}{value.value}"),)
+                    for value, label in _LENGTH_LABELS.items()
+                ),
+            )
+        elif data.startswith(SET_LENGTH_PREFIX):
+            await self._set_length(chat_id, user_id, data.removeprefix(SET_LENGTH_PREFIX))
+        elif data == EDIT_TONE:
+            tone_version = await self._current_profile_version()
+            if tone_version is None:
+                await self._api.send_message(chat_id, _NO_PROFILE_YET, buttons=_main_menu())
+            else:
+                self._pending[key] = _PendingState(
+                    PendingAction.EDIT_TONE,
+                    expected_profile_version=tone_version,
+                )
+                await self._api.send_message(
+                    chat_id,
+                    "Пришлите описание стиля/тона (промт или примеры текста) одним "
+                    f'сообщением, или "{_TONE_RESET}", чтобы вернуть стиль по умолчанию.',
+                )
+        elif data == BACKFILL_MENU:
+            await self._send_backfill_menu(chat_id)
+        elif data.startswith(BACKFILL_PREFIX):
+            await self._run_backfill(chat_id, data.removeprefix(BACKFILL_PREFIX))
         else:
             await self._api.send_message(chat_id, "Неизвестная команда.", buttons=_main_menu())
 
@@ -129,8 +222,22 @@ class BotWorkerHandlers:
             return
         if state.action is PendingAction.ADD_SOURCE:
             await self._add_source(chat_id, text)
-        else:
+        elif state.action is PendingAction.EDIT_INTERESTS:
             await self._edit_interests(
+                chat_id=chat_id,
+                user_id=user_id,
+                text=text,
+                expected_version=state.expected_profile_version,
+            )
+        elif state.action is PendingAction.EDIT_FRESHNESS:
+            await self._edit_freshness(
+                chat_id=chat_id,
+                user_id=user_id,
+                text=text,
+                expected_version=state.expected_profile_version,
+            )
+        else:
+            await self._edit_tone(
                 chat_id=chat_id,
                 user_id=user_id,
                 text=text,
@@ -252,6 +359,200 @@ class BotWorkerHandlers:
             buttons=_main_menu(),
         )
 
+    async def _current_profile_version(self) -> int | None:
+        try:
+            profile = await self._repository.get_interest_profile(self._profile_id)
+        except LookupError:
+            return None
+        return profile.version
+
+    async def _send_digest_settings(self, chat_id: int) -> None:
+        try:
+            profile = await self._repository.get_interest_profile(self._profile_id)
+        except LookupError:
+            await self._api.send_message(chat_id, _NO_PROFILE_YET, buttons=_main_menu())
+            return
+        tone = profile.tone_instructions or "по умолчанию (нейтральный редакторский стиль)"
+        text = (
+            f"Свежесть: не показывать новости старше {profile.freshness_days} дн.\n"
+            f"Длина саммари: {_LENGTH_LABELS[profile.summary_length]}\n"
+            f"Стиль: {tone}"
+        )
+        await self._api.send_message(
+            chat_id,
+            text,
+            buttons=(
+                (Button("Изменить свежесть", EDIT_FRESHNESS),),
+                (Button("Изменить длину", EDIT_LENGTH),),
+                (Button("Изменить стиль", EDIT_TONE),),
+            ),
+        )
+
+    async def _set_length(self, chat_id: int, user_id: int, raw_value: str) -> None:
+        try:
+            length = SummaryLength(raw_value)
+        except ValueError:
+            await self._api.send_message(chat_id, "Неизвестная длина.", buttons=_main_menu())
+            return
+        try:
+            profile = await self._repository.get_interest_profile(self._profile_id)
+        except LookupError:
+            await self._api.send_message(chat_id, _NO_PROFILE_YET, buttons=_main_menu())
+            return
+        try:
+            await self._repository.update_digest_length(
+                self._profile_id,
+                summary_length=length,
+                expected_version=profile.version,
+                updated_by_telegram_user_id=user_id,
+            )
+        except ConcurrentUpdateError:
+            await self._api.send_message(
+                chat_id,
+                "Настройки уже изменились в другом запросе. Откройте их снова и повторите.",
+                buttons=_main_menu(),
+            )
+            return
+        await self._api.send_message(
+            chat_id,
+            f"Длина саммари: {_LENGTH_LABELS[length]}.",
+            buttons=_main_menu(),
+        )
+
+    async def _edit_freshness(
+        self,
+        *,
+        chat_id: int,
+        user_id: int,
+        text: str,
+        expected_version: int | None,
+    ) -> None:
+        raw = text.strip()
+        if not raw.isdigit() or not (1 <= int(raw) <= 365):
+            await self._api.send_message(chat_id, "Нужно целое число дней от 1 до 365.")
+            return
+        if expected_version is None:
+            await self._api.send_message(chat_id, _NO_PROFILE_YET, buttons=_main_menu())
+            return
+        try:
+            profile = await self._repository.update_digest_freshness(
+                self._profile_id,
+                freshness_days=int(raw),
+                expected_version=expected_version,
+                updated_by_telegram_user_id=user_id,
+            )
+        except ConcurrentUpdateError:
+            await self._api.send_message(
+                chat_id,
+                "Настройки уже изменились в другом запросе. Откройте их снова и повторите.",
+                buttons=_main_menu(),
+            )
+            return
+        await self._api.send_message(
+            chat_id,
+            f"Свежесть обновлена: не старше {profile.freshness_days} дн.",
+            buttons=_main_menu(),
+        )
+
+    async def _edit_tone(
+        self,
+        *,
+        chat_id: int,
+        user_id: int,
+        text: str,
+        expected_version: int | None,
+    ) -> None:
+        raw = text.strip()
+        tone: str | None = None if raw == _TONE_RESET else raw
+        if tone is not None and not tone:
+            await self._api.send_message(chat_id, f'Пришлите текст стиля или "{_TONE_RESET}".')
+            return
+        if expected_version is None:
+            await self._api.send_message(chat_id, _NO_PROFILE_YET, buttons=_main_menu())
+            return
+        try:
+            await self._repository.update_digest_tone(
+                self._profile_id,
+                tone_instructions=tone,
+                expected_version=expected_version,
+                updated_by_telegram_user_id=user_id,
+            )
+        except ConcurrentUpdateError:
+            await self._api.send_message(
+                chat_id,
+                "Настройки уже изменились в другом запросе. Откройте их снова и повторите.",
+                buttons=_main_menu(),
+            )
+            return
+        confirmation = (
+            "Стиль сброшен на значение по умолчанию." if tone is None else "Стиль сохранён."
+        )
+        await self._api.send_message(chat_id, confirmation, buttons=_main_menu())
+
+    def set_backfill_runner(self, runner: BackfillRunner | None) -> None:
+        """Wire (or disable) the in-chat "collect for period" backfill action.
+
+        Called once from bot-worker startup after the heavier pipeline dependencies
+        (OpenAI clients, connectors, delivery, ...) are built from the same settings
+        pipeline-runner uses -- or left unset if those aren't configured, in which case
+        the backfill menu tells the owner it isn't available rather than failing.
+        """
+        self._backfill = runner
+
+    async def _send_backfill_menu(self, chat_id: int) -> None:
+        if self._backfill is None:
+            await self._api.send_message(chat_id, _BACKFILL_NOT_CONFIGURED, buttons=_main_menu())
+            return
+        await self._api.send_message(
+            chat_id,
+            "За какой период собрать новости по всем источникам? Учтите: некоторые "
+            "источники (в первую очередь сайты и RSS) отдают только недавние материалы "
+            "независимо от периода — это ограничение самого источника, не бота.",
+            buttons=tuple(
+                (Button(f"За {label}", f"{BACKFILL_PREFIX}{key}"),)
+                for key, (label, _) in _BACKFILL_PERIODS.items()
+            ),
+        )
+
+    async def _run_backfill(self, chat_id: int, period_key: str) -> None:
+        if self._backfill is None:
+            await self._api.send_message(chat_id, _BACKFILL_NOT_CONFIGURED, buttons=_main_menu())
+            return
+        period = _BACKFILL_PERIODS.get(period_key)
+        if period is None:
+            await self._api.send_message(chat_id, "Неизвестный период.", buttons=_main_menu())
+            return
+        label, days = period
+        min_published_at = (
+            _EPOCH_FLOOR if days is None else datetime.now(UTC) - timedelta(days=days)
+        )
+        await self._api.send_message(
+            chat_id,
+            f"⏳ Собираю новости за {label} по всем источникам. Это может занять "
+            "несколько минут…",
+        )
+        try:
+            report = await self._backfill.run_backfill(min_published_at=min_published_at)
+        except Exception as exc:
+            logger.exception("in-bot backfill failed")
+            await self._api.send_message(
+                chat_id,
+                f"❌ Не удалось собрать новости: {exc}",
+                buttons=_main_menu(),
+            )
+            return
+        if report.digest_posts:
+            text = (
+                f"Готово: собрано {report.collected_items}, в дайджест попало "
+                f"{report.digest_posts} (отправлено в канал)."
+            )
+        else:
+            text = (
+                f"Готово: собрано {report.collected_items}, но по теме интересов ничего "
+                "не прошло отбор — постов не отправлено."
+            )
+        await self._api.send_message(chat_id, text, buttons=_main_menu())
+
     async def _authorize(self, chat_id: int, user_id: int) -> bool:
         if user_id == self._owner_user_id:
             return True
@@ -268,4 +569,6 @@ def _main_menu() -> Keyboard:
             Button("Посмотреть интересы", VIEW_INTERESTS),
             Button("Редактировать интересы", EDIT_INTERESTS),
         ),
+        (Button("Настройки дайджеста", DIGEST_SETTINGS),),
+        (Button("Собрать за период", BACKFILL_MENU),),
     )
