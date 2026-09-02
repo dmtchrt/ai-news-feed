@@ -331,9 +331,12 @@ class PostgresRepository:
         expected_version: int,
         updated_by_telegram_user_id: int | None,
     ) -> InterestProfile:
+        normalized_tone = (
+            (tone_instructions.strip() or None) if tone_instructions is not None else None
+        )
         return await self._cas_update_profile(
             profile_id,
-            values={"tone_instructions": tone_instructions.strip() if tone_instructions else None},
+            values={"tone_instructions": normalized_tone},
             expected_version=expected_version,
             updated_by_telegram_user_id=updated_by_telegram_user_id,
         )

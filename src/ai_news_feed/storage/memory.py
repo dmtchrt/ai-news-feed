@@ -175,11 +175,14 @@ class InMemoryRepository:
         expected_version: int,
         updated_by_telegram_user_id: int | None,
     ) -> InterestProfile:
+        normalized_tone = (
+            (tone_instructions.strip() or None) if tone_instructions is not None else None
+        )
         return self._cas_update_profile(
             profile_id,
             expected_version=expected_version,
             updated_by_telegram_user_id=updated_by_telegram_user_id,
-            update={"tone_instructions": tone_instructions.strip() if tone_instructions else None},
+            update={"tone_instructions": normalized_tone},
         )
 
     def _cas_update_profile(

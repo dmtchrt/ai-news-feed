@@ -171,13 +171,16 @@ class PipelineRunner:
         """On-demand wide catch-up across all sources, for the bot's "collect for period" action.
 
         Unlike ``run()`` this does not resume previously pending digests -- that stays the
-        scheduled run's job -- and it asks every connector for one fresh snapshot with
-        ``cursor=None`` (each connector's own per-call item cap still applies, so this is a
-        single wide fetch, not deep historical pagination: how far back it actually reaches
-        depends on what the source itself exposes). Only items at or after
-        ``min_published_at`` survive into the digest via ``Processor.process``; the source
-        cursors are still advanced from what was actually collected, exactly as ``run()``
-        would, so a later scheduled run does not redundantly re-collect the same items.
+        scheduled run's job -- and it asks every connector for one fresh snapshot, with the
+        source's own stored cursor cleared for that one call (see the comment at the
+        ``model_copy`` call below for why clearing the cursor field, not just passing
+        ``cursor=None``, is what actually disables the "newer than" filter). Each connector's
+        own per-call item cap still applies, so this is a single wide fetch, not deep
+        historical pagination: how far back it actually reaches depends on what the source
+        itself exposes. Only items at or after ``min_published_at`` survive into the digest
+        via ``Processor.process``; the source cursors are still advanced from what was
+        actually collected, exactly as ``run()`` would, so a later scheduled run does not
+        redundantly re-collect the same items.
         """
         sources, profile = await self._repository.load_context(self._profile_id)
         extracted: list[ExtractedRawItem] = []
@@ -191,7 +194,13 @@ class PipelineRunner:
                 raise RuntimeError(
                     f"collector {source.collector.value} is not configured for source {source.id}"
                 ) from exc
-            batch = await connector.collect(source, cursor=None)
+            # Passing cursor=None here is NOT enough to bypass the source's own stored
+            # cursor: every connector resolves it via effective_cursor(config, explicit),
+            # which falls back to config.cursor whenever the explicit argument is None (see
+            # sources/_shared.py). A source config with its own cursor cleared is what
+            # actually makes the connector treat this as a fresh, unfiltered snapshot.
+            wide_source = source.model_copy(update={"cursor": None})
+            batch = await connector.collect(wide_source, cursor=None)
             collected_items += len(batch.raw_items)
             for error in batch.errors:
                 logger.warning(

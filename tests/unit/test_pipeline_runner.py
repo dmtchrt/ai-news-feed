@@ -30,6 +30,10 @@ class _Connector:
         cursor: CollectionCursor | None = None,
     ) -> CollectionBatch:
         assert cursor is None
+        # Catches a real regression: passing cursor=None alone does NOT disable the
+        # "newer than" filter if config.cursor is still set (effective_cursor() falls back
+        # to it). run_backfill must pass a config whose own cursor is cleared too.
+        assert config.cursor is None
         return CollectionBatch(
             raw_items=(
                 RawItem(
@@ -161,11 +165,18 @@ async def test_pipeline_runner_persists_delivery_plan_before_advancing_cursor() 
 @pytest.mark.asyncio
 async def test_pipeline_runner_backfill_ignores_cursor_and_forwards_explicit_cutoff() -> None:
     now = datetime(2026, 8, 31, 9, tzinfo=UTC)
+    # A source that has already been collected before (has its own stored cursor) is the
+    # realistic case: this is what an owner's "Собрать за период" tap actually hits, and
+    # it's exactly the case where a naive cursor=None would silently do nothing extra.
     source = SourceConfig(
         id="source",
         kind=SourceKind.WEBSITE,
         locator="https://example.test/feed.xml",
         collector=CollectorKind.NATIVE_RSS,
+        cursor=CollectionCursor(
+            published_at=datetime(2026, 8, 30, 8, tzinfo=UTC),
+            external_id="0",
+        ),
     )
     profile = InterestProfile(
         id="default",

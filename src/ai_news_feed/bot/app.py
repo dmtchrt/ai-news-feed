@@ -60,12 +60,39 @@ class _BackfillResources:
         self._telethon_client: TelegramClient | None = None
 
     async def start(self, *, repository: PostgresRepository, bot: Bot) -> PipelineRunner | None:
+        """Build the runner, or leave backfill disabled -- but never let bot startup crash.
+
+        python-telegram-bot's post_init hook is not guarded against arbitrary exceptions
+        (only KeyboardInterrupt/SystemExit pass through untouched); anything else raised
+        here would otherwise take the whole bot process down with it, contradicting the
+        promise that backfill is a pure opt-in add-on. So every failure path below --
+        missing settings, a DB error listing sources, a Telethon connection error, an
+        unexpected error building any client -- funnels into returning None here, with
+        whatever was partially opened cleaned up before returning.
+        """
         try:
             settings = PipelineSettings.from_env()
         except RuntimeError as exc:
             logger.warning("in-chat backfill disabled: %s", exc)
             return None
+        try:
+            runner = await self._build(settings, repository=repository, bot=bot)
+        except Exception:
+            logger.exception("in-chat backfill disabled: unexpected error during setup")
+            runner = None
+        if runner is None:
+            await self.stop()
+            self._http_client = None
+            self._telethon_client = None
+            return None
+        logger.info("in-chat backfill enabled")
+        return runner
 
+    async def _build(
+        self, settings: PipelineSettings, *, repository: PostgresRepository, bot: Bot
+    ) -> PipelineRunner | None:
+        # Assigned to self immediately (before any await that could fail) so start()'s
+        # cleanup always has a reference to close, no matter where below this raises.
         http_client = httpx.AsyncClient(follow_redirects=True)
         self._http_client = http_client
         connectors: dict[CollectorKind, SourceConnector] = {
@@ -85,22 +112,17 @@ class _BackfillResources:
                     "in-chat backfill disabled: TELEGRAM_API_ID/TELEGRAM_API_HASH/"
                     "TELEGRAM_SESSION are required because a Telethon source is configured"
                 )
-                await http_client.aclose()
-                self._http_client = None
                 return None
             telethon_client = TelegramClient(
                 StringSession(settings.telegram_session),
                 settings.telegram_api_id,
                 settings.telegram_api_hash,
             )
+            self._telethon_client = telethon_client
             await telethon_client.connect()
             if not await telethon_client.is_user_authorized():
                 logger.warning("in-chat backfill disabled: TELEGRAM_SESSION is not authorized")
-                await telethon_client.disconnect()
-                await http_client.aclose()
-                self._http_client = None
                 return None
-            self._telethon_client = telethon_client
             connectors[CollectorKind.TELETHON] = TelethonConnector(telethon_client)
 
         screening_client = OpenAIResponsesClient(
@@ -128,7 +150,6 @@ class _BackfillResources:
             repository=repository,
             channel_id=settings.telegram_channel_id,
         )
-        logger.info("in-chat backfill enabled")
         return PipelineRunner(
             repository=repository,
             connectors=connectors,
