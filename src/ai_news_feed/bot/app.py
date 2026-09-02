@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 import os
-from typing import Any
+from typing import Any, cast
 
+import httpx
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
@@ -14,9 +16,133 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+from telethon import TelegramClient
+from telethon.sessions import StringSession
 
 from ai_news_feed.bot.handlers import BotWorkerHandlers, Keyboard
+from ai_news_feed.dedup.semantic import SemanticClusterer
+from ai_news_feed.delivery.telegram import TelegramBotAPI, TelegramDelivery
+from ai_news_feed.domain.models import CollectorKind
+from ai_news_feed.llm.openai import OpenAIResponsesClient
+from ai_news_feed.orchestration.pipeline import PipelineRunner, PipelineSettings
+from ai_news_feed.processing import AIProcessor
+from ai_news_feed.screening import ClusterScreener
+from ai_news_feed.sources.base import SourceConnector
+from ai_news_feed.sources.rss import NativeRssConnector, RssBridgeConnector
+from ai_news_feed.sources.site import UniversalSiteConnector
+from ai_news_feed.sources.telegram import TelegramWebPreviewConnector, TelethonConnector
 from ai_news_feed.storage.postgres import PostgresRepository
+from ai_news_feed.summarization import ClusterSummarizer
+
+logger = logging.getLogger(__name__)
+
+
+class _BackfillResources:
+    """Owns the long-lived clients the bot's in-chat backfill action needs.
+
+    Mirrors ``orchestration.pipeline.run_from_env``'s wiring, but kept alive for the
+    process lifetime (built once from ``post_init``, torn down from ``post_shutdown``)
+    instead of scoped to one pipeline invocation. Reuses the running ``Application``'s
+    own already-initialized ``bot`` for delivery rather than opening a second bot
+    connection.
+
+    Deliberately optional: if ``PipelineSettings.from_env()`` can't find the pipeline's
+    OpenAI/Telegram-channel settings, ``start()`` returns ``None`` and the bot's core
+    source/interest management keeps working without the backfill button. This is a
+    conscious relaxation of "pipeline secrets stay in GitHub Actions, never on the VPS"
+    (see deploy/README.md) made specifically so the button can answer synchronously in
+    chat, as chosen over an async GitHub Actions dispatch or a DB-queued alternative --
+    it stays opt-in by leaving these variables unset in deploy/.env.example.
+    """
+
+    def __init__(self) -> None:
+        self._http_client: httpx.AsyncClient | None = None
+        self._telethon_client: TelegramClient | None = None
+
+    async def start(self, *, repository: PostgresRepository, bot: Bot) -> PipelineRunner | None:
+        try:
+            settings = PipelineSettings.from_env()
+        except RuntimeError as exc:
+            logger.warning("in-chat backfill disabled: %s", exc)
+            return None
+
+        http_client = httpx.AsyncClient(follow_redirects=True)
+        self._http_client = http_client
+        connectors: dict[CollectorKind, SourceConnector] = {
+            CollectorKind.NATIVE_RSS: NativeRssConnector(http_client),
+            CollectorKind.RSS_BRIDGE: RssBridgeConnector(http_client),
+            CollectorKind.UNIVERSAL_SCRAPER: UniversalSiteConnector(http_client),
+            CollectorKind.WEB_PREVIEW: TelegramWebPreviewConnector(http_client),
+        }
+        sources = await repository.list_sources()
+        if any(source.collector is CollectorKind.TELETHON for source in sources):
+            if (
+                settings.telegram_api_id is None
+                or not settings.telegram_api_hash
+                or not settings.telegram_session
+            ):
+                logger.warning(
+                    "in-chat backfill disabled: TELEGRAM_API_ID/TELEGRAM_API_HASH/"
+                    "TELEGRAM_SESSION are required because a Telethon source is configured"
+                )
+                await http_client.aclose()
+                self._http_client = None
+                return None
+            telethon_client = TelegramClient(
+                StringSession(settings.telegram_session),
+                settings.telegram_api_id,
+                settings.telegram_api_hash,
+            )
+            await telethon_client.connect()
+            if not await telethon_client.is_user_authorized():
+                logger.warning("in-chat backfill disabled: TELEGRAM_SESSION is not authorized")
+                await telethon_client.disconnect()
+                await http_client.aclose()
+                self._http_client = None
+                return None
+            self._telethon_client = telethon_client
+            connectors[CollectorKind.TELETHON] = TelethonConnector(telethon_client)
+
+        screening_client = OpenAIResponsesClient(
+            api_key=settings.openai_api_key,
+            model=settings.openai_screening_model,
+            base_url=settings.openai_base_url,
+            max_output_tokens=1_000,
+            client=http_client,
+        )
+        summary_client = OpenAIResponsesClient(
+            api_key=settings.openai_api_key,
+            model=settings.openai_summary_model,
+            base_url=settings.openai_base_url,
+            max_output_tokens=2_000,
+            client=http_client,
+        )
+        processor = AIProcessor(
+            repository=repository,
+            semantic_clusterer=SemanticClusterer(model_name=settings.semhash_model),
+            screener=ClusterScreener(screening_client),
+            summarizer=ClusterSummarizer(summary_client),
+        )
+        delivery = TelegramDelivery(
+            bot=cast(TelegramBotAPI, bot),
+            repository=repository,
+            channel_id=settings.telegram_channel_id,
+        )
+        logger.info("in-chat backfill enabled")
+        return PipelineRunner(
+            repository=repository,
+            connectors=connectors,
+            processor=processor,
+            delivery=delivery,
+            channel_id=settings.telegram_channel_id,
+            interest_profile_id=settings.interest_profile_id,
+        )
+
+    async def stop(self) -> None:
+        if self._telethon_client is not None:
+            await self._telethon_client.disconnect()
+        if self._http_client is not None:
+            await self._http_client.aclose()
 
 
 class PythonTelegramBotAPI:
@@ -56,12 +182,26 @@ def build_application(
     owner_user_id: int,
     interest_profile_id: str = "default",
 ) -> Application[Any, Any, Any, Any, Any, Any]:
-    async def close_repository(
+    resources = _BackfillResources()
+
+    async def post_init(application: Application[Any, Any, Any, Any, Any, Any]) -> None:
+        handlers.set_backfill_runner(
+            await resources.start(repository=repository, bot=application.bot)
+        )
+
+    async def post_shutdown(
         _application: Application[Any, Any, Any, Any, Any, Any],
     ) -> None:
+        await resources.stop()
         await repository.close()
 
-    application = Application.builder().token(token).post_shutdown(close_repository).build()
+    application = (
+        Application.builder()
+        .token(token)
+        .post_init(post_init)
+        .post_shutdown(post_shutdown)
+        .build()
+    )
     handlers = BotWorkerHandlers(
         repository=repository,
         api=PythonTelegramBotAPI(application.bot),

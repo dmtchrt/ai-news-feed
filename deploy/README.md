@@ -33,6 +33,17 @@ The bot creates the initial `default` InterestProfile when the owner first uses
 “Редактировать интересы”. For one bot token, run exactly one bot-worker replica and keep
 Telegram webhook mode disabled.
 
+The commented-out block at the bottom of `.env.example` is optional and enables the bot's
+in-chat "Собрать за период" backfill button by giving bot-worker the same OpenAI/channel/
+Telethon access as pipeline-runner. This intentionally puts those secrets on the VPS in
+addition to GitHub Actions, trading away the isolation described in section 3 for a
+synchronous in-chat reply -- the alternative would be an async GitHub Actions dispatch or a
+DB-queued job, which do not answer in the same chat message. Leave it commented out to keep
+the VPS on the minimal secret set; the button then tells the owner it isn't configured and
+the rest of bot-worker (source/interest/digest-settings management) is unaffected either
+way. See ARCHITECTURE.md, "Свежесть, настройки дайджеста и backfill", for the backfill
+mechanism's own scope (single wide fetch per source, not deep historical pagination).
+
 ## 3. Configure GitHub Actions later
 
 Add repository secrets `DATABASE_URL`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHANNEL_ID`,

@@ -7,6 +7,7 @@ import logging
 import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Protocol, cast
 
 import httpx
@@ -40,6 +41,7 @@ class Processor(Protocol):
         *,
         interest_profile_id: str,
         interest_profile: InterestProfile | None = None,
+        min_published_at: datetime | None = None,
     ) -> AIProcessingResult: ...
 
 
@@ -163,6 +165,99 @@ class PipelineRunner:
             clusters=len(processing.cluster_batch.clusters),
             digest_posts=len(digest.posts) if digest is not None else 0,
             resumed_digests=len(pending),
+        )
+
+    async def run_backfill(self, *, min_published_at: datetime) -> PipelineRunReport:
+        """On-demand wide catch-up across all sources, for the bot's "collect for period" action.
+
+        Unlike ``run()`` this does not resume previously pending digests -- that stays the
+        scheduled run's job -- and it asks every connector for one fresh snapshot with
+        ``cursor=None`` (each connector's own per-call item cap still applies, so this is a
+        single wide fetch, not deep historical pagination: how far back it actually reaches
+        depends on what the source itself exposes). Only items at or after
+        ``min_published_at`` survive into the digest via ``Processor.process``; the source
+        cursors are still advanced from what was actually collected, exactly as ``run()``
+        would, so a later scheduled run does not redundantly re-collect the same items.
+        """
+        sources, profile = await self._repository.load_context(self._profile_id)
+        extracted: list[ExtractedRawItem] = []
+        cursor_updates = {}
+        collected_items = 0
+        extraction_failures = 0
+        for source in sources:
+            try:
+                connector = self._connectors[source.collector]
+            except KeyError as exc:
+                raise RuntimeError(
+                    f"collector {source.collector.value} is not configured for source {source.id}"
+                ) from exc
+            batch = await connector.collect(source, cursor=None)
+            collected_items += len(batch.raw_items)
+            for error in batch.errors:
+                logger.warning(
+                    "backfill source=%s code=%s retryable=%s: %s",
+                    error.source_id,
+                    error.code,
+                    error.retryable,
+                    error.message,
+                )
+            if batch.next_cursor is not None and not any(error.retryable for error in batch.errors):
+                cursor_updates[source.id] = batch.next_cursor
+            for raw_item in batch.raw_items:
+                result = self._extractor.extract(raw_item)
+                if isinstance(result, ExtractedItem):
+                    extracted.append(ExtractedRawItem(raw_item, result))
+                else:
+                    extraction_failures += 1
+                    logger.warning(
+                        "backfill source=%s external_id=%s extraction=%s: %s",
+                        raw_item.source_id,
+                        raw_item.external_id,
+                        result.code,
+                        result.message,
+                    )
+
+        processing = await self._processor.process(
+            extracted,
+            interest_profile_id=profile.id,
+            interest_profile=profile,
+            min_published_at=min_published_at,
+        )
+        digest = self._composer.compose(
+            processing.digest_items,
+            profile_id=profile.id,
+            profile_version=profile.version,
+        )
+        await self._repository.save_processing_result(
+            materials=processing.materials,
+            clusters=processing.cluster_batch.clusters,
+            duplicate_links=processing.cluster_batch.duplicate_links,
+            screening_results=processing.screening_results,
+            profile_id=profile.id,
+            profile_version=profile.version,
+            digest=digest,
+            channel_id=str(self._channel_id) if digest is not None else None,
+        )
+        if digest is not None:
+            await self._delivery.send(digest)
+
+        await self._repository.save_processing_result(
+            materials=(),
+            clusters=(),
+            duplicate_links=(),
+            screening_results=(),
+            profile_id=profile.id,
+            profile_version=profile.version,
+            source_cursors=cursor_updates,
+        )
+        return PipelineRunReport(
+            sources=len(sources),
+            collected_items=collected_items,
+            extraction_failures=extraction_failures,
+            stored_materials=len(processing.materials),
+            clusters=len(processing.cluster_batch.clusters),
+            digest_posts=len(digest.posts) if digest is not None else 0,
+            resumed_digests=0,
         )
 
 
