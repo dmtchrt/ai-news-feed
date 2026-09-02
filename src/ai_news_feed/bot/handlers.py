@@ -77,6 +77,7 @@ class BackfillReport(Protocol):
     collected_items: int
     extraction_failures: int
     stored_materials: int
+    clusters: int
     digest_posts: int
 
 
@@ -221,31 +222,37 @@ class BotWorkerHandlers:
             )
             return
         if state.action is PendingAction.ADD_SOURCE:
-            await self._add_source(chat_id, text)
+            done = await self._add_source(chat_id, text)
         elif state.action is PendingAction.EDIT_INTERESTS:
-            await self._edit_interests(
+            done = await self._edit_interests(
                 chat_id=chat_id,
                 user_id=user_id,
                 text=text,
                 expected_version=state.expected_profile_version,
             )
         elif state.action is PendingAction.EDIT_FRESHNESS:
-            await self._edit_freshness(
+            done = await self._edit_freshness(
                 chat_id=chat_id,
                 user_id=user_id,
                 text=text,
                 expected_version=state.expected_profile_version,
             )
         else:
-            await self._edit_tone(
+            done = await self._edit_tone(
                 chat_id=chat_id,
                 user_id=user_id,
                 text=text,
                 expected_version=state.expected_profile_version,
             )
-        self._pending.pop(key, None)
+        # Only clear the pending action once it actually resolves (success, or a
+        # terminal error that sends the user back to the main menu). Invalid input
+        # that expects a retry (e.g. "not a number" for freshness) must leave the
+        # pending state in place -- otherwise the next message silently falls
+        # through to "Выберите действие кнопкой" instead of being read as the retry.
+        if done:
+            self._pending.pop(key, None)
 
-    async def _add_source(self, chat_id: int, text: str) -> None:
+    async def _add_source(self, chat_id: int, text: str) -> bool:
         try:
             parsed = parse_source_locator(text)
             source = SourceConfig(
@@ -261,15 +268,16 @@ class BotWorkerHandlers:
                 f"Такой источник уже есть (id: {exc.existing_source_id}).",
                 buttons=_main_menu(),
             )
-            return
+            return True
         except ValueError as exc:
             await self._api.send_message(chat_id, f"Не удалось добавить источник: {exc}")
-            return
+            return False
         await self._api.send_message(
             chat_id,
             f"Источник добавлен: {added.locator}\nid: {added.id}",
             buttons=_main_menu(),
         )
+        return True
 
     async def _send_sources(self, chat_id: int) -> None:
         sources = await self._repository.list_sources()
@@ -321,11 +329,11 @@ class BotWorkerHandlers:
         user_id: int,
         text: str,
         expected_version: int | None,
-    ) -> None:
+    ) -> bool:
         description = text.strip()
         if not description:
             await self._api.send_message(chat_id, "Текст интересов не может быть пустым.")
-            return
+            return False
         try:
             if expected_version is None:
                 now = datetime.now(UTC)
@@ -352,12 +360,13 @@ class BotWorkerHandlers:
                 "Профиль уже изменился в другом запросе. Откройте его снова и повторите правку.",
                 buttons=_main_menu(),
             )
-            return
+            return True
         await self._api.send_message(
             chat_id,
             f"Интересы сохранены, версия {profile.version}.",
             buttons=_main_menu(),
         )
+        return True
 
     async def _current_profile_version(self) -> int | None:
         try:
@@ -426,14 +435,14 @@ class BotWorkerHandlers:
         user_id: int,
         text: str,
         expected_version: int | None,
-    ) -> None:
+    ) -> bool:
         raw = text.strip()
         if not raw.isdigit() or not (1 <= int(raw) <= 365):
             await self._api.send_message(chat_id, "Нужно целое число дней от 1 до 365.")
-            return
+            return False
         if expected_version is None:
             await self._api.send_message(chat_id, _NO_PROFILE_YET, buttons=_main_menu())
-            return
+            return True
         try:
             profile = await self._repository.update_digest_freshness(
                 self._profile_id,
@@ -447,12 +456,13 @@ class BotWorkerHandlers:
                 "Настройки уже изменились в другом запросе. Откройте их снова и повторите.",
                 buttons=_main_menu(),
             )
-            return
+            return True
         await self._api.send_message(
             chat_id,
             f"Свежесть обновлена: не старше {profile.freshness_days} дн.",
             buttons=_main_menu(),
         )
+        return True
 
     async def _edit_tone(
         self,
@@ -461,15 +471,15 @@ class BotWorkerHandlers:
         user_id: int,
         text: str,
         expected_version: int | None,
-    ) -> None:
+    ) -> bool:
         raw = text.strip()
         tone: str | None = None if raw == _TONE_RESET else raw
         if tone is not None and not tone:
             await self._api.send_message(chat_id, f'Пришлите текст стиля или "{_TONE_RESET}".')
-            return
+            return False
         if expected_version is None:
             await self._api.send_message(chat_id, _NO_PROFILE_YET, buttons=_main_menu())
-            return
+            return True
         try:
             await self._repository.update_digest_tone(
                 self._profile_id,
@@ -483,11 +493,12 @@ class BotWorkerHandlers:
                 "Настройки уже изменились в другом запросе. Откройте их снова и повторите.",
                 buttons=_main_menu(),
             )
-            return
+            return True
         confirmation = (
             "Стиль сброшен на значение по умолчанию." if tone is None else "Стиль сохранён."
         )
         await self._api.send_message(chat_id, confirmation, buttons=_main_menu())
+        return True
 
     def set_backfill_runner(self, runner: BackfillRunner | None) -> None:
         """Wire (or disable) the in-chat "collect for period" backfill action.
@@ -543,14 +554,18 @@ class BotWorkerHandlers:
             return
         if report.digest_posts:
             text = (
-                f"Готово: собрано {report.collected_items}, в дайджест попало "
-                f"{report.digest_posts} (отправлено в канал)."
+                f"Готово: собрано {report.collected_items}, материалов "
+                f"{report.stored_materials}, кластеров {report.clusters}, в дайджест "
+                f"попало {report.digest_posts} (отправлено в канал)."
             )
         else:
             text = (
-                f"Готово: собрано {report.collected_items}, но по теме интересов ничего "
-                "не прошло отбор — постов не отправлено."
+                f"Готово: собрано {report.collected_items}, материалов "
+                f"{report.stored_materials}, кластеров {report.clusters}, но по теме "
+                "интересов ничего не прошло отбор — постов не отправлено."
             )
+        if report.extraction_failures:
+            text += f"\nОшибок извлечения: {report.extraction_failures}."
         await self._api.send_message(chat_id, text, buttons=_main_menu())
 
     async def _authorize(self, chat_id: int, user_id: int) -> bool:

@@ -48,6 +48,7 @@ class _FakeBackfillReport:
     collected_items: int
     extraction_failures: int
     stored_materials: int
+    clusters: int
     digest_posts: int
 
 
@@ -212,6 +213,7 @@ async def test_backfill_runs_for_selected_period_and_reports_counts() -> None:
             collected_items=42,
             extraction_failures=0,
             stored_materials=10,
+            clusters=4,
             digest_posts=3,
         )
     )
@@ -245,6 +247,7 @@ async def test_backfill_all_time_uses_epoch_floor() -> None:
             collected_items=5,
             extraction_failures=0,
             stored_materials=5,
+            clusters=2,
             digest_posts=0,
         )
     )
@@ -280,3 +283,25 @@ async def test_backfill_rejects_unknown_period() -> None:
 
     assert not runner.calls
     assert "неизвестный период" in api.messages[-1].text.lower()
+
+
+@pytest.mark.asyncio
+async def test_add_source_keeps_pending_state_after_invalid_input() -> None:
+    """Regression: handle_text used to clear the pending action unconditionally,
+    even when the handler rejected the input and expected a retry (invalid source
+    text, or "not a number" for freshness -- see test_bot_manages_digest_settings).
+    That silently dropped the next, valid message instead of treating it as the
+    retry."""
+    repository = InMemoryRepository()
+    api = _FakeBotAPI()
+    handlers = BotWorkerHandlers(repository=repository, api=api, owner_user_id=42)
+
+    await handlers.handle_callback(chat_id=100, user_id=42, data=ADD_SOURCE)
+    await handlers.handle_text(chat_id=100, user_id=42, text="not a url")
+    assert "http(s)-url" in api.messages[-1].text.lower()
+    assert not await repository.list_sources()
+
+    await handlers.handle_text(chat_id=100, user_id=42, text="@ailev_blog")
+    sources = await repository.list_sources()
+    assert len(sources) == 1
+    assert sources[0].locator == "@ailev_blog"
