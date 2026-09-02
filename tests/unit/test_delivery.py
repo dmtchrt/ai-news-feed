@@ -58,6 +58,26 @@ def test_digest_composer_returns_none_for_expected_empty_result_and_respects_lim
     assert len(digest.posts) >= 2
 
 
+def test_digest_composer_never_merges_two_items_into_one_post() -> None:
+    # Default 4096-char limit: both items would easily fit in a single post together,
+    # but "one news item -> one post" must hold regardless of how much room is left.
+    composer = DigestComposer()
+
+    digest = composer.compose(
+        [_item(1), _item(2)],
+        profile_id="default",
+        profile_version=1,
+        created_at=datetime(2026, 8, 31, tzinfo=UTC),
+    )
+
+    assert digest is not None
+    assert len(digest.posts) == 2
+    assert "Новость номер 1" in digest.posts[0]
+    assert "Новость номер 2" not in digest.posts[0]
+    assert "Новость номер 2" in digest.posts[1]
+    assert "Новость номер 1" not in digest.posts[1]
+
+
 @pytest.mark.asyncio
 async def test_delivery_is_checkpointed_and_second_send_is_noop() -> None:
     digest = DigestComposer().compose(

@@ -56,24 +56,26 @@ class DigestComposer:
         )
 
     def _pack(self, blocks: Sequence[str]) -> tuple[str, ...]:
+        """One news item -> one post: never merge two items' text into the same post.
+
+        A single item's own text still gets split across multiple posts if it alone
+        exceeds the limit -- only cross-item merging is disallowed.
+        """
         separator = "\n\n"
         prefix = f"{self.header}\n\n"
         content_limit = self.max_post_chars - len(prefix)
-        chunks: list[str] = []
-        for block in blocks:
-            chunks.extend(_split_text(block, content_limit))
-
         posts: list[str] = []
-        current = ""
-        for chunk in chunks:
-            candidate = chunk if not current else f"{current}{separator}{chunk}"
-            if len(candidate) <= content_limit:
-                current = candidate
-                continue
-            posts.append(f"{prefix}{current}")
-            current = chunk
-        if current:
-            posts.append(f"{prefix}{current}")
+        for block in blocks:
+            current = ""
+            for chunk in _split_text(block, content_limit):
+                candidate = chunk if not current else f"{current}{separator}{chunk}"
+                if len(candidate) <= content_limit:
+                    current = candidate
+                    continue
+                posts.append(f"{prefix}{current}")
+                current = chunk
+            if current:
+                posts.append(f"{prefix}{current}")
         return tuple(posts)
 
 
