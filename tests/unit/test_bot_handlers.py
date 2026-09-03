@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from ai_news_feed.bot.handlers import (
+    ABOUT,
     ADD_SOURCE,
     BACKFILL_MENU,
     BACKFILL_PREFIX,
@@ -16,6 +17,7 @@ from ai_news_feed.bot.handlers import (
     EDIT_TONE,
     LIST_SOURCES,
     SET_LENGTH_PREFIX,
+    SETTINGS_MENU,
     VIEW_INTERESTS,
     BotWorkerHandlers,
     Keyboard,
@@ -96,10 +98,10 @@ async def test_bot_adds_lists_rejects_duplicate_and_soft_deletes_source() -> Non
     handlers = BotWorkerHandlers(repository=repository, api=api, owner_user_id=42)
 
     await handlers.handle_start(chat_id=100, user_id=42)
-    assert [button.text for row in api.messages[-1].buttons for button in row][:3] == [
-        "Добавить источник",
-        "Посмотреть все источники",
-        "Удалить источник",
+    assert [button.text for row in api.messages[-1].buttons for button in row] == [
+        "⚙️ Настройки",
+        "Собрать за период",
+        "О боте",
     ]
 
     await handlers.handle_callback(chat_id=100, user_id=42, data=ADD_SOURCE)
@@ -319,6 +321,85 @@ async def test_add_source_keeps_pending_state_after_invalid_input() -> None:
     assert "http(s)-url" in api.messages[-1].text.lower()
     assert not await repository.list_sources()
 
+    await handlers.handle_text(chat_id=100, user_id=42, text="@ailev_blog")
+    sources = await repository.list_sources()
+    assert len(sources) == 1
+    assert sources[0].locator == "@ailev_blog"
+
+
+@pytest.mark.asyncio
+async def test_bot_settings_menu_and_about_screen() -> None:
+    repository = InMemoryRepository()
+    api = _FakeBotAPI()
+    handlers = BotWorkerHandlers(repository=repository, api=api, owner_user_id=42)
+
+    await handlers.handle_start(chat_id=100, user_id=42)
+    assert [button.text for row in api.messages[-1].buttons for button in row] == [
+        "⚙️ Настройки",
+        "Собрать за период",
+        "О боте",
+    ]
+
+    await handlers.handle_callback(chat_id=100, user_id=42, data=SETTINGS_MENU)
+    assert [button.text for row in api.messages[-1].buttons for button in row] == [
+        "Добавить источник",
+        "Посмотреть все источники",
+        "Удалить источник",
+        "Посмотреть интересы",
+        "Редактировать интересы",
+        "Настройки дайджеста",
+        "Проверить фильтр",
+    ]
+
+    await handlers.handle_callback(chat_id=100, user_id=42, data=ABOUT)
+    assert "AI News Feed" in api.messages[-1].text
+    assert [button.text for row in api.messages[-1].buttons for button in row] == [
+        "⚙️ Настройки",
+        "Собрать за период",
+        "О боте",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_bot_add_source_from_forwarded_channel() -> None:
+    """Forwarding a channel post is an alternative to typing a link/@handle --
+    app.py resolves the forward to a public username before calling handle_text."""
+    repository = InMemoryRepository()
+    api = _FakeBotAPI()
+    handlers = BotWorkerHandlers(repository=repository, api=api, owner_user_id=42)
+
+    await handlers.handle_callback(chat_id=100, user_id=42, data=ADD_SOURCE)
+    await handlers.handle_text(
+        chat_id=100,
+        user_id=42,
+        text="",
+        forwarded_channel_username="AiLev_Blog",
+    )
+    sources = await repository.list_sources()
+    assert len(sources) == 1
+    assert sources[0].locator == "@ailev_blog"
+    assert "добавлен" in api.messages[-1].text.lower()
+
+
+@pytest.mark.asyncio
+async def test_bot_add_source_from_forward_without_username_keeps_pending_state() -> None:
+    repository = InMemoryRepository()
+    api = _FakeBotAPI()
+    handlers = BotWorkerHandlers(repository=repository, api=api, owner_user_id=42)
+
+    await handlers.handle_callback(chat_id=100, user_id=42, data=ADD_SOURCE)
+    await handlers.handle_text(
+        chat_id=100,
+        user_id=42,
+        text="",
+        forward_missing_username=True,
+    )
+    assert "нет публичного" in api.messages[-1].text.lower()
+    assert not await repository.list_sources()
+
+    # Pending state must survive the rejection, exactly like any other invalid
+    # add-source attempt -- otherwise the next, valid message silently falls
+    # through to "Выберите действие кнопкой" instead of being read as the retry.
     await handlers.handle_text(chat_id=100, user_id=42, text="@ailev_blog")
     sources = await repository.list_sources()
     assert len(sources) == 1

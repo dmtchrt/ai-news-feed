@@ -33,6 +33,8 @@ EDIT_TONE = "digest:edit-tone"
 BACKFILL_MENU = "backfill:menu"
 BACKFILL_PREFIX = "backfill:run:"
 CHECK_SCREENING = "menu:check-screening"
+SETTINGS_MENU = "menu:settings"
+ABOUT = "menu:about"
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +45,14 @@ _LENGTH_LABELS: dict[SummaryLength, str] = {
 }
 _TONE_RESET = "-"
 _NO_PROFILE_YET = "Сначала задайте интересы — без них не с чем связывать настройки дайджеста."
+_ABOUT_TEXT = (
+    "🤖 AI News Feed\n\n"
+    "Личный бот-дайджест: собирает новости из твоих источников (сайты и "
+    "Telegram-каналы), убирает дубли, отсеивает нерелевантное через LLM-фильтр и "
+    "присылает саммари с рабочими ссылками в канал — минимум раз в день, без "
+    "ручного запуска.\n\n"
+    "Источники, интересы и настройки дайджеста — в «Настройки»."
+)
 _BACKFILL_NOT_CONFIGURED = (
     "Сбор за период недоступен: бот запущен без настроек пайплайна "
     "(OpenAI/канал/Telethon). Обратитесь к администратору бота."
@@ -156,7 +166,8 @@ class BotWorkerHandlers:
             self._pending[key] = _PendingState(PendingAction.ADD_SOURCE)
             await self._api.send_message(
                 chat_id,
-                "Пришлите URL сайта/RSS или Telegram-канал в формате @handle.",
+                "Пришлите URL сайта/RSS, Telegram-канал в формате @handle, "
+                "либо перешлите сюда сообщение из канала.",
             )
         elif data == LIST_SOURCES:
             await self._send_sources(chat_id)
@@ -230,10 +241,22 @@ class BotWorkerHandlers:
             await self._run_backfill(chat_id, data.removeprefix(BACKFILL_PREFIX))
         elif data == CHECK_SCREENING:
             await self._send_screening_review(chat_id)
+        elif data == SETTINGS_MENU:
+            await self._api.send_message(chat_id, "Настройки:", buttons=_settings_menu())
+        elif data == ABOUT:
+            await self._api.send_message(chat_id, _ABOUT_TEXT, buttons=_main_menu())
         else:
             await self._api.send_message(chat_id, "Неизвестная команда.", buttons=_main_menu())
 
-    async def handle_text(self, *, chat_id: int, user_id: int, text: str) -> None:
+    async def handle_text(
+        self,
+        *,
+        chat_id: int,
+        user_id: int,
+        text: str,
+        forwarded_channel_username: str | None = None,
+        forward_missing_username: bool = False,
+    ) -> None:
         if not await self._authorize(chat_id, user_id):
             return
         key = (chat_id, user_id)
@@ -246,7 +269,12 @@ class BotWorkerHandlers:
             )
             return
         if state.action is PendingAction.ADD_SOURCE:
-            done = await self._add_source(chat_id, text)
+            done = await self._add_source(
+                chat_id,
+                text,
+                forwarded_channel_username=forwarded_channel_username,
+                forward_missing_username=forward_missing_username,
+            )
         elif state.action is PendingAction.EDIT_INTERESTS:
             done = await self._edit_interests(
                 chat_id=chat_id,
@@ -276,9 +304,24 @@ class BotWorkerHandlers:
         if done:
             self._pending.pop(key, None)
 
-    async def _add_source(self, chat_id: int, text: str) -> bool:
+    async def _add_source(
+        self,
+        chat_id: int,
+        text: str,
+        *,
+        forwarded_channel_username: str | None = None,
+        forward_missing_username: bool = False,
+    ) -> bool:
+        if forward_missing_username:
+            await self._api.send_message(
+                chat_id,
+                "У этого канала нет публичного @username, так его нельзя добавить "
+                "пересылкой. Пришлите ссылку или @handle вручную.",
+            )
+            return False
+        locator_input = f"@{forwarded_channel_username}" if forwarded_channel_username else text
         try:
-            parsed = parse_source_locator(text)
+            parsed = parse_source_locator(locator_input)
             source = SourceConfig(
                 id=str(uuid4()),
                 kind=parsed.kind,
@@ -619,6 +662,14 @@ class BotWorkerHandlers:
 
 def _main_menu() -> Keyboard:
     return (
+        (Button("⚙️ Настройки", SETTINGS_MENU),),
+        (Button("Собрать за период", BACKFILL_MENU),),
+        (Button("О боте", ABOUT),),
+    )
+
+
+def _settings_menu() -> Keyboard:
+    return (
         (Button("Добавить источник", ADD_SOURCE),),
         (Button("Посмотреть все источники", LIST_SOURCES),),
         (Button("Удалить источник", DELETE_SOURCE),),
@@ -627,7 +678,6 @@ def _main_menu() -> Keyboard:
             Button("Редактировать интересы", EDIT_INTERESTS),
         ),
         (Button("Настройки дайджеста", DIGEST_SETTINGS),),
-        (Button("Собрать за период", BACKFILL_MENU),),
         (Button("Проверить фильтр", CHECK_SCREENING),),
     )
 

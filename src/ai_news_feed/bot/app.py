@@ -7,7 +7,13 @@ import os
 from typing import Any, cast
 
 import httpx
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import (
+    Bot,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    MessageOriginChannel,
+    Update,
+)
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -248,22 +254,37 @@ def build_application(
 
     async def text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         del context
-        if (
-            update.effective_chat is not None
-            and update.effective_user is not None
-            and update.effective_message is not None
-            and update.effective_message.text is not None
-        ):
-            await handlers.handle_text(
-                chat_id=update.effective_chat.id,
-                user_id=update.effective_user.id,
-                text=update.effective_message.text,
-            )
+        message = update.effective_message
+        if update.effective_chat is None or update.effective_user is None or message is None:
+            return
+        # A forwarded channel post lets "Добавить источник" add the channel directly,
+        # without the user having to go find and paste its link or @handle themselves.
+        forwarded_channel_username: str | None = None
+        forward_missing_username = False
+        origin = message.forward_origin
+        if isinstance(origin, MessageOriginChannel):
+            if origin.chat.username:
+                forwarded_channel_username = origin.chat.username
+            else:
+                forward_missing_username = True
+        is_channel_forward = forwarded_channel_username is not None or forward_missing_username
+        if message.text is None and not is_channel_forward:
+            return
+        await handlers.handle_text(
+            chat_id=update.effective_chat.id,
+            user_id=update.effective_user.id,
+            text=message.text or "",
+            forwarded_channel_username=forwarded_channel_username,
+            forward_missing_username=forward_missing_username,
+        )
 
     application.add_handler(CommandHandler("start", start, filters=filters.ChatType.PRIVATE))
     application.add_handler(CallbackQueryHandler(callback))
     application.add_handler(
-        MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, text)
+        MessageHandler(
+            filters.ChatType.PRIVATE & (filters.TEXT | filters.FORWARDED) & ~filters.COMMAND,
+            text,
+        )
     )
     return application
 
