@@ -80,8 +80,9 @@ class _Bot:
     def __init__(self) -> None:
         self.posts: list[str] = []
 
-    async def send_message(self, *, chat_id, text, disable_web_page_preview):
+    async def send_message(self, *, chat_id, text, parse_mode, disable_web_page_preview):
         assert chat_id == -100123
+        assert parse_mode == "HTML"
         assert disable_web_page_preview
         self.posts.append(text)
         return _Message(len(self.posts))
