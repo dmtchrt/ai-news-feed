@@ -86,9 +86,7 @@ interest_profiles = Table(
     CheckConstraint("btrim(name) <> ''", name="interest_name_not_blank"),
     CheckConstraint("btrim(description) <> ''", name="interest_description_not_blank"),
     CheckConstraint("version >= 1", name="interest_version_positive"),
-    CheckConstraint(
-        "freshness_days BETWEEN 1 AND 365", name="interest_freshness_days_range"
-    ),
+    CheckConstraint("freshness_days BETWEEN 1 AND 365", name="interest_freshness_days_range"),
     CheckConstraint(
         "tone_instructions IS NULL OR btrim(tone_instructions) <> ''",
         name="interest_tone_instructions_not_blank",

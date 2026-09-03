@@ -552,8 +552,7 @@ class BotWorkerHandlers:
         )
         await self._api.send_message(
             chat_id,
-            f"⏳ Собираю новости за {label} по всем источникам. Это может занять "
-            "несколько минут…",
+            f"⏳ Собираю новости за {label} по всем источникам. Это может занять несколько минут…",
         )
         try:
             report = await self._backfill.run_backfill(min_published_at=min_published_at)

@@ -114,9 +114,7 @@ def test_digest_item_shows_date_under_link_when_available() -> None:
 
     assert digest is not None
     sources_section = digest.posts[0].split("Источники:\n", 1)[1]
-    assert sources_section == (
-        '1. <a href="https://example.test/1">example.test</a>\n03.08.2026'
-    )
+    assert sources_section == ('1. <a href="https://example.test/1">example.test</a>\n03.08.2026')
 
 
 def test_digest_item_pairs_each_link_with_its_own_date_in_order() -> None:

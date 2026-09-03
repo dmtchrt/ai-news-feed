@@ -217,11 +217,7 @@ def build_application(
         await repository.close()
 
     application = (
-        Application.builder()
-        .token(token)
-        .post_init(post_init)
-        .post_shutdown(post_shutdown)
-        .build()
+        Application.builder().token(token).post_init(post_init).post_shutdown(post_shutdown).build()
     )
     handlers = BotWorkerHandlers(
         repository=repository,

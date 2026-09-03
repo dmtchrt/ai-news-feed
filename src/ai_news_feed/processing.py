@@ -94,9 +94,7 @@ class AIProcessor:
         # reach dedup/clustering/LLM screening. A caller can widen this explicitly (the
         # on-demand "collect for period" bot action) via min_published_at; the standing
         # scheduled run always uses the profile's own freshness_days setting.
-        freshness_cutoff = min_published_at or (
-            run_time - timedelta(days=profile.freshness_days)
-        )
+        freshness_cutoff = min_published_at or (run_time - timedelta(days=profile.freshness_days))
         materials = tuple(
             material
             for material in (

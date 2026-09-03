@@ -714,9 +714,7 @@ class PostgresRepository:
             .subquery()
         )
         statement = (
-            select(latest_per_cluster)
-            .order_by(latest_per_cluster.c.created_at.desc())
-            .limit(limit)
+            select(latest_per_cluster).order_by(latest_per_cluster.c.created_at.desc()).limit(limit)
         )
         async with self._engine.connect() as connection:
             rows = (await connection.execute(statement)).mappings().all()
