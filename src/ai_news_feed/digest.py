@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import html
 import json
 from collections.abc import Sequence
 from datetime import UTC, datetime
+from urllib.parse import urlsplit
 
 from ai_news_feed.domain.models import Digest, DigestItem
 
@@ -80,8 +82,20 @@ class DigestComposer:
 
 
 def _format_item(item: DigestItem) -> str:
-    links = "\n".join(f"{index}. {url}" for index, url in enumerate(item.source_links, 1))
-    return f"• {item.summary}\nИсточники:\n{links}"
+    dates = item.source_published_ats
+    lines: list[str] = []
+    for index, url in enumerate(item.source_links, 1):
+        anchor = f'<a href="{html.escape(url, quote=True)}">{html.escape(_link_label(url))}</a>'
+        lines.append(f"{index}. {anchor}")
+        if dates is not None:
+            lines.append(dates[index - 1].strftime("%d.%m.%Y"))
+    links = "\n".join(lines)
+    return f"• {html.escape(item.summary)}\nИсточники:\n{links}"
+
+
+def _link_label(url: str) -> str:
+    netloc = urlsplit(url).netloc.removeprefix("www.")
+    return netloc or url
 
 
 def _split_text(text: str, limit: int) -> tuple[str, ...]:

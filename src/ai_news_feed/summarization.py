@@ -87,6 +87,7 @@ class ClusterSummarizer:
             cluster_id=cluster.id,
             summary=payload.summary,
             source_links=tuple(material.original_url for material in ordered_materials),
+            source_published_ats=tuple(material.published_at for material in ordered_materials),
             model=response.model,
             prompt_version=SUMMARY_PROMPT_VERSION,
         )

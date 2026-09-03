@@ -10,8 +10,14 @@ from typing import Protocol
 from uuid import uuid4
 
 from ai_news_feed.domain.models import InterestProfile, SourceConfig, SummaryLength
+from ai_news_feed.screening import ScreeningThresholds
 from ai_news_feed.sources.locator import parse_source_locator
-from ai_news_feed.storage.base import ConcurrentUpdateError, DuplicateSourceError, Repository
+from ai_news_feed.storage.base import (
+    ConcurrentUpdateError,
+    DuplicateSourceError,
+    Repository,
+    ScreeningReview,
+)
 
 ADD_SOURCE = "menu:add-source"
 LIST_SOURCES = "menu:list-sources"
@@ -26,6 +32,7 @@ SET_LENGTH_PREFIX = "digest:set-length:"
 EDIT_TONE = "digest:edit-tone"
 BACKFILL_MENU = "backfill:menu"
 BACKFILL_PREFIX = "backfill:run:"
+CHECK_SCREENING = "menu:check-screening"
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +54,10 @@ _BACKFILL_PERIODS: dict[str, tuple[str, int | None]] = {
     "year": ("год", 365),
     "all": ("всё время", None),
 }
+_SCREENING_REVIEW_LIMIT = 10
+_SCREENING_REVIEW_REASON_CHARS = 160
+_SCREENING_REVIEW_TITLE_CHARS = 200
+_SCREENING_REVIEW_MAX_MESSAGE_CHARS = 3800
 
 
 @dataclass(frozen=True)
@@ -206,6 +217,8 @@ class BotWorkerHandlers:
             await self._send_backfill_menu(chat_id)
         elif data.startswith(BACKFILL_PREFIX):
             await self._run_backfill(chat_id, data.removeprefix(BACKFILL_PREFIX))
+        elif data == CHECK_SCREENING:
+            await self._send_screening_review(chat_id)
         else:
             await self._api.send_message(chat_id, "Неизвестная команда.", buttons=_main_menu())
 
@@ -568,6 +581,25 @@ class BotWorkerHandlers:
             text += f"\nОшибок извлечения: {report.extraction_failures}."
         await self._api.send_message(chat_id, text, buttons=_main_menu())
 
+    async def _send_screening_review(self, chat_id: int) -> None:
+        reviews = await self._repository.list_recent_screenings(
+            self._profile_id, limit=_SCREENING_REVIEW_LIMIT
+        )
+        if not reviews:
+            await self._api.send_message(
+                chat_id,
+                "Пока нет ни одной проверенной новости — сначала запустите сбор.",
+                buttons=_main_menu(),
+            )
+            return
+        thresholds = ScreeningThresholds()
+        blocks = [f"Последние {len(reviews)} проверенных новостей:"]
+        blocks.extend(_format_screening_review(review, thresholds) for review in reviews)
+        text = "\n\n".join(blocks)
+        if len(text) > _SCREENING_REVIEW_MAX_MESSAGE_CHARS:
+            text = text[:_SCREENING_REVIEW_MAX_MESSAGE_CHARS].rstrip() + "\n\n(сообщение обрезано)"
+        await self._api.send_message(chat_id, text, buttons=_main_menu())
+
     async def _authorize(self, chat_id: int, user_id: int) -> bool:
         if user_id == self._owner_user_id:
             return True
@@ -586,4 +618,28 @@ def _main_menu() -> Keyboard:
         ),
         (Button("Настройки дайджеста", DIGEST_SETTINGS),),
         (Button("Собрать за период", BACKFILL_MENU),),
+        (Button("Проверить фильтр", CHECK_SCREENING),),
+    )
+
+
+def _truncate(text: str, limit: int) -> str:
+    stripped = text.strip()
+    if len(stripped) <= limit:
+        return stripped
+    return stripped[: limit - 1].rstrip() + "…"
+
+
+def _format_screening_review(review: ScreeningReview, thresholds: ScreeningThresholds) -> str:
+    result = review.result
+    verdict = "✅ прошла" if thresholds.accepts(result) else "❌ отклонена"
+    if result.uncertain:
+        verdict += " (не уверен)"
+    date = review.material_published_at.strftime("%d.%m.%Y")
+    title = _truncate(review.material_title, _SCREENING_REVIEW_TITLE_CHARS)
+    reason = _truncate(result.reason, _SCREENING_REVIEW_REASON_CHARS)
+    return (
+        f"{verdict} — релевантность {result.relevance_score:.2f}, шум {result.noise_score:.2f}\n"
+        f"{title} ({date})\n"
+        f"{review.material_url}\n"
+        f"Причина: {reason}"
     )

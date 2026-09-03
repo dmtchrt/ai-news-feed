@@ -7,6 +7,7 @@ from ai_news_feed.bot.handlers import (
     ADD_SOURCE,
     BACKFILL_MENU,
     BACKFILL_PREFIX,
+    CHECK_SCREENING,
     DELETE_SOURCE,
     DIGEST_SETTINGS,
     EDIT_FRESHNESS,
@@ -19,6 +20,8 @@ from ai_news_feed.bot.handlers import (
     BotWorkerHandlers,
     Keyboard,
 )
+from ai_news_feed.domain.models import Material, NewsCluster, ScreeningResult
+from ai_news_feed.normalization import content_hash
 from ai_news_feed.storage.memory import InMemoryRepository
 
 
@@ -69,6 +72,21 @@ class _FakeBackfillRunner:
             raise self.error
         assert self.report is not None
         return self.report
+
+
+def _material(material_id: str, published_at: datetime) -> Material:
+    text = f"Текст новости {material_id}"
+    return Material(
+        id=material_id,
+        source_id="source",
+        external_id=material_id,
+        original_url=f"https://example.test/{material_id}",
+        published_at=published_at,
+        fetched_at=published_at,
+        title=f"Новость {material_id}",
+        text=text,
+        content_hash=content_hash(text),
+    )
 
 
 @pytest.mark.asyncio
@@ -305,3 +323,135 @@ async def test_add_source_keeps_pending_state_after_invalid_input() -> None:
     sources = await repository.list_sources()
     assert len(sources) == 1
     assert sources[0].locator == "@ailev_blog"
+
+
+@pytest.mark.asyncio
+async def test_bot_screening_review_reports_when_nothing_screened_yet() -> None:
+    repository = InMemoryRepository()
+    api = _FakeBotAPI()
+    handlers = BotWorkerHandlers(repository=repository, api=api, owner_user_id=42)
+
+    await handlers.handle_callback(chat_id=100, user_id=42, data=CHECK_SCREENING)
+
+    assert "сначала запустите сбор" in api.messages[-1].text.lower()
+    assert api.messages[-1].buttons != ()
+
+
+@pytest.mark.asyncio
+async def test_bot_shows_recent_screening_verdicts_with_reason_and_date() -> None:
+    repository = InMemoryRepository()
+    api = _FakeBotAPI()
+    handlers = BotWorkerHandlers(repository=repository, api=api, owner_user_id=42)
+    published_at = datetime(2026, 8, 3, tzinfo=UTC)
+    accepted_material = _material("accepted", published_at)
+    rejected_material = _material("rejected", published_at)
+    accepted_cluster = NewsCluster(
+        id="cluster-accepted",
+        material_ids=(accepted_material.id,),
+        representative_id=accepted_material.id,
+        similarities={accepted_material.id: 1.0},
+    )
+    rejected_cluster = NewsCluster(
+        id="cluster-rejected",
+        material_ids=(rejected_material.id,),
+        representative_id=rejected_material.id,
+        similarities={rejected_material.id: 1.0},
+    )
+    accepted_screening = ScreeningResult(
+        cluster_id=accepted_cluster.id,
+        relevance_score=0.9,
+        noise_score=0.1,
+        reason="Точно по теме ИИ-агентов.",
+        model="fake-screen",
+        prompt_version="screen-v1",
+    )
+    rejected_screening = ScreeningResult(
+        cluster_id=rejected_cluster.id,
+        relevance_score=0.2,
+        noise_score=0.1,
+        reason="Не по теме.",
+        model="fake-screen",
+        prompt_version="screen-v1",
+    )
+    await repository.save_processing_result(
+        materials=(accepted_material, rejected_material),
+        clusters=(accepted_cluster, rejected_cluster),
+        duplicate_links=(),
+        screening_results=(accepted_screening, rejected_screening),
+        profile_id="default",
+        profile_version=1,
+    )
+
+    await handlers.handle_callback(chat_id=100, user_id=42, data=CHECK_SCREENING)
+
+    text = api.messages[-1].text
+    assert "✅" in text
+    assert "❌" in text
+    assert accepted_material.title in text
+    assert rejected_material.title in text
+    assert accepted_material.original_url in text
+    assert rejected_material.original_url in text
+    assert "Точно по теме ИИ-агентов." in text
+    assert "Не по теме." in text
+    assert text.count("03.08.2026") == 2
+
+
+@pytest.mark.asyncio
+async def test_bot_screening_review_message_stays_under_telegram_limit() -> None:
+    """Regression: BotAPI.send_message is a single, unchunked message (nothing like
+    digest.py's _split_text/_pack is reused here) -- ten items with realistically long
+    titles/URLs/reasons must still fit, or Telegram would reject the whole message."""
+    repository = InMemoryRepository()
+    api = _FakeBotAPI()
+    handlers = BotWorkerHandlers(repository=repository, api=api, owner_user_id=42)
+    published_at = datetime(2026, 8, 3, tzinfo=UTC)
+    long_title_suffix = "очень длинный заголовок с массой подробностей " * 5
+    long_query = "utm_source=test&utm_campaign=" + "x" * 250
+    materials = [
+        Material(
+            id=f"m{i}",
+            source_id="source",
+            external_id=f"m{i}",
+            original_url=f"https://example.test/article-{i}?{long_query}",
+            published_at=published_at,
+            fetched_at=published_at,
+            title=f"Новость {i}: {long_title_suffix}",
+            text=f"Текст новости {i}",
+            content_hash=content_hash(f"Текст новости {i}"),
+        )
+        for i in range(10)
+    ]
+    clusters = [
+        NewsCluster(
+            id=f"cluster-{i}",
+            material_ids=(material.id,),
+            representative_id=material.id,
+            similarities={material.id: 1.0},
+        )
+        for i, material in enumerate(materials)
+    ]
+    screenings = [
+        ScreeningResult(
+            cluster_id=cluster.id,
+            relevance_score=0.9,
+            noise_score=0.1,
+            reason="Подробное обоснование релевантности этой новости. " * 10,
+            model="fake-screen",
+            prompt_version="screen-v1",
+        )
+        for cluster in clusters
+    ]
+    await repository.save_processing_result(
+        materials=materials,
+        clusters=clusters,
+        duplicate_links=(),
+        screening_results=screenings,
+        profile_id="default",
+        profile_version=1,
+    )
+
+    await handlers.handle_callback(chat_id=100, user_id=42, data=CHECK_SCREENING)
+
+    text = api.messages[-1].text
+    assert len(text) <= 4096
+    assert "(сообщение обрезано)" in text

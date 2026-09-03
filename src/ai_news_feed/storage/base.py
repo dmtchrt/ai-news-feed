@@ -39,6 +39,21 @@ class PendingDigestPost:
     text: str
 
 
+@dataclass(frozen=True)
+class ScreeningReview:
+    """One screened cluster, joined with its representative material for display.
+
+    Wraps the real ScreeningResult (not a copy of its fields) so callers can reuse
+    ScreeningResult.accepted()/ScreeningThresholds.accepts() -- the same accept/reject
+    logic the pipeline itself applies -- instead of re-deriving a verdict from raw scores.
+    """
+
+    result: ScreeningResult
+    material_title: str
+    material_url: str
+    material_published_at: datetime
+
+
 class Repository(Protocol):
     async def load_context(
         self,
@@ -139,5 +154,9 @@ class Repository(Protocol):
     ) -> None: ...
 
     async def get_delivery_receipt(self, digest_id: str) -> DeliveryReceipt | None: ...
+
+    async def list_recent_screenings(
+        self, profile_id: str, *, limit: int = 10
+    ) -> tuple[ScreeningReview, ...]: ...
 
     async def close(self) -> None: ...

@@ -9,11 +9,18 @@ from ai_news_feed.domain.models import DigestItem
 from ai_news_feed.storage.memory import InMemoryRepository
 
 
-def _item(index: int, *, summary: str | None = None) -> DigestItem:
+def _item(
+    index: int,
+    *,
+    summary: str | None = None,
+    source_links: tuple[str, ...] | None = None,
+    source_published_ats: tuple[datetime, ...] | None = None,
+) -> DigestItem:
     return DigestItem(
         cluster_id=f"cluster-{index}",
         summary=summary or f"Новость номер {index} о развитии автономных ИИ-агентов.",
-        source_links=(f"https://example.test/{index}",),
+        source_links=source_links or (f"https://example.test/{index}",),
+        source_published_ats=source_published_ats,
         model="fake-summary",
         prompt_version="summary-v1",
     )
@@ -26,7 +33,7 @@ class _SentMessage:
 
 class _FakeTelegramBot:
     def __init__(self, *, fail_on_call: int | None = None) -> None:
-        self.calls: list[tuple[str | int, str, bool]] = []
+        self.calls: list[tuple[str | int, str, str | None, bool]] = []
         self.fail_on_call = fail_on_call
 
     async def send_message(
@@ -34,9 +41,10 @@ class _FakeTelegramBot:
         *,
         chat_id: str | int,
         text: str,
+        parse_mode: str | None,
         disable_web_page_preview: bool,
     ) -> _SentMessage:
-        self.calls.append((chat_id, text, disable_web_page_preview))
+        self.calls.append((chat_id, text, parse_mode, disable_web_page_preview))
         if self.fail_on_call == len(self.calls):
             raise RuntimeError("fake Telegram outage")
         return _SentMessage(message_id=1000 + len(self.calls))
@@ -78,6 +86,91 @@ def test_digest_composer_never_merges_two_items_into_one_post() -> None:
     assert "Новость номер 1" not in digest.posts[1]
 
 
+def test_digest_item_link_is_hidden_html_anchor_not_raw_url() -> None:
+    composer = DigestComposer()
+
+    digest = composer.compose(
+        [_item(1)],
+        profile_id="default",
+        profile_version=1,
+        created_at=datetime(2026, 8, 31, tzinfo=UTC),
+    )
+
+    assert digest is not None
+    sources_section = digest.posts[0].split("Источники:\n", 1)[1]
+    assert sources_section == '1. <a href="https://example.test/1">example.test</a>'
+
+
+def test_digest_item_shows_date_under_link_when_available() -> None:
+    composer = DigestComposer()
+    item = _item(1, source_published_ats=(datetime(2026, 8, 3, tzinfo=UTC),))
+
+    digest = composer.compose(
+        [item],
+        profile_id="default",
+        profile_version=1,
+        created_at=datetime(2026, 8, 31, tzinfo=UTC),
+    )
+
+    assert digest is not None
+    sources_section = digest.posts[0].split("Источники:\n", 1)[1]
+    assert sources_section == (
+        '1. <a href="https://example.test/1">example.test</a>\n03.08.2026'
+    )
+
+
+def test_digest_item_pairs_each_link_with_its_own_date_in_order() -> None:
+    composer = DigestComposer()
+    item = _item(
+        1,
+        source_links=("https://a.example.test/x", "https://b.example.test/y"),
+        source_published_ats=(
+            datetime(2026, 8, 3, tzinfo=UTC),
+            datetime(2026, 8, 10, tzinfo=UTC),
+        ),
+    )
+
+    digest = composer.compose(
+        [item],
+        profile_id="default",
+        profile_version=1,
+        created_at=datetime(2026, 8, 31, tzinfo=UTC),
+    )
+
+    assert digest is not None
+    sources_section = digest.posts[0].split("Источники:\n", 1)[1]
+    assert sources_section == (
+        '1. <a href="https://a.example.test/x">a.example.test</a>\n'
+        "03.08.2026\n"
+        '2. <a href="https://b.example.test/y">b.example.test</a>\n'
+        "10.08.2026"
+    )
+
+
+def test_digest_item_escapes_html_special_characters_in_summary_and_link_label() -> None:
+    composer = DigestComposer()
+    item = _item(
+        1,
+        summary="Компании A&B обсуждают <AGI> risk > reward",
+        source_links=("https://example.test/a&b",),
+    )
+
+    digest = composer.compose(
+        [item],
+        profile_id="default",
+        profile_version=1,
+        created_at=datetime(2026, 8, 31, tzinfo=UTC),
+    )
+
+    assert digest is not None
+    post = digest.posts[0]
+    assert "A&amp;B" in post
+    assert "&lt;AGI&gt;" in post
+    assert "risk &gt; reward" in post
+    assert "<AGI>" not in post
+    assert 'href="https://example.test/a&amp;b"' in post
+
+
 @pytest.mark.asyncio
 async def test_delivery_is_checkpointed_and_second_send_is_noop() -> None:
     digest = DigestComposer().compose(
@@ -102,7 +195,8 @@ async def test_delivery_is_checkpointed_and_second_send_is_noop() -> None:
     assert first == second
     assert first.telegram_message_ids == (1001,)
     assert len(bot.calls) == 1
-    assert bot.calls[0][2]
+    assert bot.calls[0][2] == "HTML"
+    assert bot.calls[0][3] is True
 
 
 @pytest.mark.asyncio

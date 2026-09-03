@@ -20,6 +20,7 @@ class TelegramBotAPI(Protocol):
         *,
         chat_id: str | int,
         text: str,
+        parse_mode: str | None,
         disable_web_page_preview: bool,
     ) -> SentTelegramMessage: ...
 
@@ -50,6 +51,7 @@ class TelegramDelivery:
                 message = await self._bot.send_message(
                     chat_id=self._channel_id,
                     text=post.text,
+                    parse_mode="HTML",
                     disable_web_page_preview=True,
                 )
             except Exception as exc:

@@ -34,6 +34,7 @@ from ai_news_feed.storage.base import (
     ConcurrentUpdateError,
     DuplicateSourceError,
     PendingDigestPost,
+    ScreeningReview,
 )
 from ai_news_feed.storage.tables import (
     cluster_materials,
@@ -672,6 +673,55 @@ class PostgresRepository:
             sent_at=max(row.sent_at for row in rows if row.sent_at is not None),
         )
 
+    async def list_recent_screenings(
+        self, profile_id: str, *, limit: int = 10
+    ) -> tuple[ScreeningReview, ...]:
+        if limit < 1:
+            raise ValueError("limit must be at least 1")
+        # A cluster can have more than one screening_results row if it was re-screened
+        # under a different model/prompt_version (see the composite PK in tables.py) --
+        # DISTINCT ON keeps only the latest row per cluster before the outer LIMIT, so a
+        # re-screened cluster never occupies two of the N slots shown to the operator.
+        latest_per_cluster = (
+            select(
+                screening_results_table.c.cluster_id,
+                screening_results_table.c.relevance_score,
+                screening_results_table.c.noise_score,
+                screening_results_table.c.uncertain,
+                screening_results_table.c.reason,
+                screening_results_table.c.model,
+                screening_results_table.c.prompt_version,
+                screening_results_table.c.created_at,
+                materials_table.c.title,
+                materials_table.c.original_url,
+                materials_table.c.published_at,
+            )
+            .select_from(
+                screening_results_table.join(
+                    news_clusters,
+                    news_clusters.c.id == screening_results_table.c.cluster_id,
+                ).join(
+                    materials_table,
+                    materials_table.c.id == news_clusters.c.representative_id,
+                )
+            )
+            .where(screening_results_table.c.profile_id == profile_id)
+            .distinct(screening_results_table.c.cluster_id)
+            .order_by(
+                screening_results_table.c.cluster_id,
+                screening_results_table.c.created_at.desc(),
+            )
+            .subquery()
+        )
+        statement = (
+            select(latest_per_cluster)
+            .order_by(latest_per_cluster.c.created_at.desc())
+            .limit(limit)
+        )
+        async with self._engine.connect() as connection:
+            rows = (await connection.execute(statement)).mappings().all()
+        return tuple(_screening_review_from_row(row) for row in rows)
+
     async def close(self) -> None:
         if self._owns_engine:
             await self._engine.dispose()
@@ -836,3 +886,20 @@ def _screening_values(
         "uncertain": result.uncertain,
         "reason": result.reason,
     }
+
+
+def _screening_review_from_row(row: RowMapping) -> ScreeningReview:
+    return ScreeningReview(
+        result=ScreeningResult(
+            cluster_id=str(row["cluster_id"]),
+            relevance_score=float(row["relevance_score"]),
+            noise_score=float(row["noise_score"]),
+            uncertain=bool(row["uncertain"]),
+            reason=str(row["reason"]),
+            model=str(row["model"]),
+            prompt_version=str(row["prompt_version"]),
+        ),
+        material_title=str(row["title"]),
+        material_url=str(row["original_url"]),
+        material_published_at=row["published_at"],
+    )

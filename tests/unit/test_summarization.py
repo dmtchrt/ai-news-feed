@@ -22,14 +22,14 @@ class _FakeLLM:
         return LLMResponse(text=json.dumps({"summary": self.summary}), model="fake-summary")
 
 
-def _material(material_id: str) -> Material:
+def _material(material_id: str, *, published_at: datetime | None = None) -> Material:
     text = f"Текст новости {material_id}"
     return Material(
         id=material_id,
         source_id=f"source-{material_id}",
         external_id=material_id,
         original_url=f"https://example.test/{material_id}",
-        published_at=datetime(2026, 8, 31, tzinfo=UTC),
+        published_at=published_at or datetime(2026, 8, 31, tzinfo=UTC),
         fetched_at=datetime(2026, 8, 31, tzinfo=UTC),
         title=f"Новость {material_id}",
         text=text,
@@ -55,6 +55,29 @@ async def test_summary_has_every_source_link_added_by_code() -> None:
         "https://example.test/one",
         "https://example.test/two",
     )
+
+
+@pytest.mark.asyncio
+async def test_summary_pairs_each_source_published_at_with_its_own_link() -> None:
+    materials = [
+        _material("one", published_at=datetime(2026, 8, 3, tzinfo=UTC)),
+        _material("two", published_at=datetime(2026, 8, 10, tzinfo=UTC)),
+    ]
+    cluster = NewsCluster(
+        id="cluster",
+        material_ids=("one", "two"),
+        representative_id="one",
+        similarities={"one": 1.0, "two": 0.94},
+    )
+    client = _FakeLLM("Два источника сообщили о запуске нового AI-инструмента.")
+
+    digest_item = await ClusterSummarizer(client).summarize(cluster, materials)
+
+    assert digest_item.source_published_ats is not None
+    assert len(digest_item.source_published_ats) == len(digest_item.source_links)
+    paired = dict(zip(digest_item.source_links, digest_item.source_published_ats, strict=True))
+    assert paired["https://example.test/one"] == datetime(2026, 8, 3, tzinfo=UTC)
+    assert paired["https://example.test/two"] == datetime(2026, 8, 10, tzinfo=UTC)
 
 
 @pytest.mark.asyncio

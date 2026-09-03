@@ -22,6 +22,7 @@ from ai_news_feed.storage.base import (
     ConcurrentUpdateError,
     DuplicateSourceError,
     PendingDigestPost,
+    ScreeningReview,
 )
 
 
@@ -354,6 +355,37 @@ class InMemoryRepository:
             telegram_message_ids=tuple(receipt[0] for receipt in complete),
             sent_at=max(receipt[1] for receipt in complete),
         )
+
+    async def list_recent_screenings(
+        self, profile_id: str, *, limit: int = 10
+    ) -> tuple[ScreeningReview, ...]:
+        if limit < 1:
+            raise ValueError("limit must be at least 1")
+        # self._screening_results is a plain dict, so iteration order is insertion order;
+        # used here as a recency proxy since (unlike Postgres's screening_results.created_at)
+        # nothing in memory records when a result was screened. A later entry for the same
+        # cluster_id (re-screened under a different model/prompt_version) replaces the
+        # earlier one and is treated as more recent, matching the Postgres read's "latest
+        # created_at per cluster_id" behaviour.
+        latest_by_cluster: dict[str, tuple[int, ScreeningResult]] = {}
+        for order, (key, result) in enumerate(self._screening_results.items()):
+            if key[1] != profile_id:
+                continue
+            latest_by_cluster[result.cluster_id] = (order, result)
+        ordered = sorted(latest_by_cluster.values(), key=lambda pair: pair[0], reverse=True)
+        reviews: list[ScreeningReview] = []
+        for _, result in ordered[:limit]:
+            cluster = self._clusters[result.cluster_id]
+            material = self._materials[cluster.representative_id]
+            reviews.append(
+                ScreeningReview(
+                    result=result,
+                    material_title=material.title,
+                    material_url=material.original_url,
+                    material_published_at=material.published_at,
+                )
+            )
+        return tuple(reviews)
 
     async def close(self) -> None:
         return None

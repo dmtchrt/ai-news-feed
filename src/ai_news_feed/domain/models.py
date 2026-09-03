@@ -356,6 +356,14 @@ class DigestItem(ContractModel):
     cluster_id: str = Field(min_length=1)
     summary: str = Field(min_length=1)
     source_links: tuple[str, ...] = Field(min_length=1)
+    # Per-link original publish date, same order/length as source_links. Optional and
+    # deliberately NOT persisted (no digest_items column, no migration): DigestComposer
+    # consumes it once, at compose time, to render a date under each link -- the result
+    # lands in the already-formatted Digest.posts strings, which is what actually gets
+    # re-sent on a resumed/checkpointed delivery. A DigestItem rebuilt from storage (see
+    # storage/postgres.py:list_pending_digests) never has this field re-populated and
+    # never needs it, since its text is never re-rendered.
+    source_published_ats: tuple[datetime, ...] | None = None
     model: str = Field(min_length=1)
     prompt_version: str = Field(min_length=1)
 
@@ -376,6 +384,17 @@ class DigestItem(ContractModel):
             if parsed.scheme not in {"http", "https"} or not parsed.netloc:
                 raise ValueError("source links must be absolute HTTP(S) URLs")
         return stripped
+
+    @model_validator(mode="after")
+    def digest_dates_are_utc_and_match_links(self) -> DigestItem:
+        if self.source_published_ats is None:
+            return self
+        if len(self.source_published_ats) != len(self.source_links):
+            raise ValueError("source_published_ats must have one entry per source_links")
+        for value in self.source_published_ats:
+            if value.tzinfo is None or value.utcoffset() is None:
+                raise ValueError("source_published_ats entries must be timezone-aware")
+        return self
 
 
 class Digest(ContractModel):

@@ -17,6 +17,7 @@ from ai_news_feed.domain.models import (
     SourceConfig,
     SourceKind,
 )
+from ai_news_feed.screening import ScreeningThresholds
 from ai_news_feed.storage.base import ConcurrentUpdateError, DuplicateSourceError
 from ai_news_feed.storage.postgres import PostgresRepository
 
@@ -174,6 +175,134 @@ async def test_processing_storage_and_digest_checkpoints(repository: PostgresRep
     receipt = await repository.get_delivery_receipt(digest.id)
     assert receipt is not None
     assert receipt.telegram_message_ids == (777,)
+
+
+@pytest.mark.asyncio
+async def test_list_recent_screenings_dedupes_by_cluster_and_filters_by_profile(
+    repository: PostgresRepository,
+) -> None:
+    now = datetime(2026, 8, 31, 8, tzinfo=UTC)
+    await repository.add_source(
+        SourceConfig(
+            id="source",
+            kind=SourceKind.WEBSITE,
+            locator="https://example.test/feed.xml",
+            collector=CollectorKind.NATIVE_RSS,
+        )
+    )
+    profile = await repository.create_interest_profile(
+        InterestProfile(
+            id="default",
+            name="Основные интересы",
+            description="ИИ-агенты",
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    other_profile = await repository.create_interest_profile(
+        InterestProfile(
+            id="other",
+            name="Другой профиль",
+            description="Не про ИИ",
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    accepted_material = _material("accepted", "1", now)
+    rejected_material = _material("rejected", "2", now)
+    other_profile_material = _material("other-profile", "3", now)
+    accepted_cluster = NewsCluster(
+        id="cluster-accepted",
+        material_ids=(accepted_material.id,),
+        representative_id=accepted_material.id,
+        similarities={accepted_material.id: 1.0},
+    )
+    rejected_cluster = NewsCluster(
+        id="cluster-rejected",
+        material_ids=(rejected_material.id,),
+        representative_id=rejected_material.id,
+        similarities={rejected_material.id: 1.0},
+    )
+    other_profile_cluster = NewsCluster(
+        id="cluster-other-profile",
+        material_ids=(other_profile_material.id,),
+        representative_id=other_profile_material.id,
+        similarities={other_profile_material.id: 1.0},
+    )
+    accepted_screening = ScreeningResult(
+        cluster_id=accepted_cluster.id,
+        relevance_score=0.9,
+        noise_score=0.1,
+        reason="Точно по теме ИИ-агентов.",
+        model="fake-screen",
+        prompt_version="screen-v1",
+    )
+    rejected_screening = ScreeningResult(
+        cluster_id=rejected_cluster.id,
+        relevance_score=0.2,
+        noise_score=0.1,
+        reason="Не по теме.",
+        model="fake-screen",
+        prompt_version="screen-v1",
+    )
+    other_profile_screening = ScreeningResult(
+        cluster_id=other_profile_cluster.id,
+        relevance_score=0.9,
+        noise_score=0.1,
+        reason="Для другого профиля.",
+        model="fake-screen",
+        prompt_version="screen-v1",
+    )
+
+    await repository.save_processing_result(
+        materials=(accepted_material, rejected_material, other_profile_material),
+        clusters=(accepted_cluster, rejected_cluster, other_profile_cluster),
+        duplicate_links=(),
+        screening_results=(accepted_screening, rejected_screening),
+        profile_id=profile.id,
+        profile_version=profile.version,
+    )
+    await repository.save_processing_result(
+        materials=(),
+        clusters=(),
+        duplicate_links=(),
+        screening_results=(other_profile_screening,),
+        profile_id=other_profile.id,
+        profile_version=other_profile.version,
+    )
+    # Re-screen the same cluster under a different model: a second row under the same
+    # composite PK's cluster_id (see screening_results in tables.py) -- must still
+    # surface only once, not twice, in the deduped read.
+    rescreened = rejected_screening.model_copy(
+        update={"model": "fake-screen-v2", "reason": "Пересмотрено: всё ещё не по теме."}
+    )
+    await repository.save_processing_result(
+        materials=(),
+        clusters=(),
+        duplicate_links=(),
+        screening_results=(rescreened,),
+        profile_id=profile.id,
+        profile_version=profile.version,
+    )
+
+    reviews = await repository.list_recent_screenings(profile.id, limit=10)
+
+    assert len(reviews) == 2
+    assert {review.result.cluster_id for review in reviews} == {
+        accepted_cluster.id,
+        rejected_cluster.id,
+    }
+    thresholds = ScreeningThresholds()
+    verdicts = {review.result.cluster_id: thresholds.accepts(review.result) for review in reviews}
+    assert verdicts[accepted_cluster.id] is True
+    assert verdicts[rejected_cluster.id] is False
+    accepted_review = next(r for r in reviews if r.result.cluster_id == accepted_cluster.id)
+    assert accepted_review.material_title == accepted_material.title
+    assert accepted_review.material_url == accepted_material.original_url
+    assert accepted_review.material_published_at == now
+
+    limited = await repository.list_recent_screenings(profile.id, limit=1)
+    assert len(limited) == 1
 
 
 def _material(material_id: str, external_id: str, timestamp: datetime) -> Material:
