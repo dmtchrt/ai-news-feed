@@ -83,13 +83,24 @@ class BackfillReport(Protocol):
     """Structurally matches orchestration.pipeline.PipelineRunReport, without importing it
     (that module pulls in OpenAI/Telethon/python-telegram-bot at module scope; handlers.py
     stays limited to storage + domain models so its own tests stay dependency-light).
+
+    Declared as read-only properties, not plain attributes: PipelineRunReport is a frozen
+    dataclass, and mypy treats a Protocol's plain `name: int` attribute as read-write, which
+    a frozen dataclass's field can never satisfy (assigning to it raises at runtime). A
+    read-only property only requires the attribute to be gettable, which frozen dataclass
+    fields already are -- and handlers.py only ever reads these fields, never assigns them.
     """
 
-    collected_items: int
-    extraction_failures: int
-    stored_materials: int
-    clusters: int
-    digest_posts: int
+    @property
+    def collected_items(self) -> int: ...
+    @property
+    def extraction_failures(self) -> int: ...
+    @property
+    def stored_materials(self) -> int: ...
+    @property
+    def clusters(self) -> int: ...
+    @property
+    def digest_posts(self) -> int: ...
 
 
 class BackfillRunner(Protocol):
