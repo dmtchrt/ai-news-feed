@@ -9,6 +9,7 @@ from ai_news_feed.domain.models import (
     CollectionCursor,
     DeliveryReceipt,
     Digest,
+    DigestSendTime,
     DuplicateLink,
     InterestProfile,
     Material,
@@ -184,6 +185,21 @@ class InMemoryRepository:
             expected_version=expected_version,
             updated_by_telegram_user_id=updated_by_telegram_user_id,
             update={"tone_instructions": normalized_tone},
+        )
+
+    async def update_digest_send_times(
+        self,
+        profile_id: str,
+        *,
+        digest_send_times: tuple[DigestSendTime, ...],
+        expected_version: int,
+        updated_by_telegram_user_id: int | None,
+    ) -> InterestProfile:
+        return self._cas_update_profile(
+            profile_id,
+            expected_version=expected_version,
+            updated_by_telegram_user_id=updated_by_telegram_user_id,
+            update={"digest_send_times": digest_send_times},
         )
 
     def _cas_update_profile(

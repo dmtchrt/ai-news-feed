@@ -11,6 +11,7 @@ from ai_news_feed.domain.models import (
     CollectionCursor,
     DeliveryReceipt,
     Digest,
+    DigestSendTime,
     DuplicateLink,
     InterestProfile,
     Material,
@@ -109,6 +110,15 @@ class Repository(Protocol):
         profile_id: str,
         *,
         tone_instructions: str | None,
+        expected_version: int,
+        updated_by_telegram_user_id: int | None,
+    ) -> InterestProfile: ...
+
+    async def update_digest_send_times(
+        self,
+        profile_id: str,
+        *,
+        digest_send_times: tuple[DigestSendTime, ...],
         expected_version: int,
         updated_by_telegram_user_id: int | None,
     ) -> InterestProfile: ...

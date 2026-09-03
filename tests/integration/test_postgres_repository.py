@@ -8,6 +8,7 @@ from sqlalchemy import text
 from ai_news_feed.digest import DigestComposer
 from ai_news_feed.domain.models import (
     CollectorKind,
+    DigestSendTime,
     DuplicateKind,
     DuplicateLink,
     InterestProfile,
@@ -93,6 +94,50 @@ async def test_source_identity_soft_delete_restore_and_profile_concurrency(
             "default",
             description="устаревшая запись",
             expected_version=1,
+            updated_by_telegram_user_id=42,
+        )
+
+
+@pytest.mark.asyncio
+async def test_digest_send_times_round_trip_and_optimistic_update(
+    repository: PostgresRepository,
+) -> None:
+    now = datetime(2026, 9, 3, tzinfo=UTC)
+    created = await repository.create_interest_profile(
+        InterestProfile(
+            id="default",
+            name="Основные интересы",
+            description="ИИ-агенты",
+            digest_send_times=(
+                DigestSendTime(hour=9),
+                DigestSendTime(weekday=1, hour=18),
+            ),
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    assert created.digest_send_times == (
+        DigestSendTime(hour=9),
+        DigestSendTime(weekday=1, hour=18),
+    )
+
+    updated = await repository.update_digest_send_times(
+        "default",
+        digest_send_times=(DigestSendTime(weekday=4, hour=12),),
+        expected_version=created.version,
+        updated_by_telegram_user_id=42,
+    )
+    assert updated.digest_send_times == (DigestSendTime(weekday=4, hour=12),)
+    assert updated.version == 2
+    assert (await repository.get_interest_profile("default")).digest_send_times == (
+        DigestSendTime(weekday=4, hour=12),
+    )
+
+    with pytest.raises(ConcurrentUpdateError):
+        await repository.update_digest_send_times(
+            "default",
+            digest_send_times=(),
+            expected_version=created.version,
             updated_by_telegram_user_id=42,
         )
 

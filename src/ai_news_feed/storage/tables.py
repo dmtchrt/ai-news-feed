@@ -80,6 +80,7 @@ interest_profiles = Table(
         server_default=SummaryLength.NORMAL.value,
     ),
     Column("tone_instructions", Text),
+    Column("digest_send_times", JSONB, nullable=False, server_default="[]"),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     Column("updated_by_telegram_user_id", BigInteger),
@@ -90,6 +91,10 @@ interest_profiles = Table(
     CheckConstraint(
         "tone_instructions IS NULL OR btrim(tone_instructions) <> ''",
         name="interest_tone_instructions_not_blank",
+    ),
+    CheckConstraint(
+        "jsonb_typeof(digest_send_times) = 'array'",
+        name="interest_digest_send_times_array",
     ),
     CheckConstraint(
         "updated_by_telegram_user_id IS NULL OR updated_by_telegram_user_id > 0",

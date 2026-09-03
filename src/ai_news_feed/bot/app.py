@@ -25,7 +25,7 @@ from telegram.ext import (
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 
-from ai_news_feed.bot.handlers import BotWorkerHandlers, Keyboard
+from ai_news_feed.bot.handlers import RUN_NOW, BotWorkerHandlers, Keyboard
 from ai_news_feed.dedup.semantic import SemanticClusterer
 from ai_news_feed.delivery.telegram import TelegramBotAPI, TelegramDelivery
 from ai_news_feed.domain.models import CollectorKind
@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 
 class _BackfillResources:
-    """Owns the long-lived clients the bot's in-chat backfill action needs.
+    """Owns the long-lived clients used by the bot's in-chat pipeline actions.
 
     Mirrors ``orchestration.pipeline.run_from_env``'s wiring, but kept alive for the
     process lifetime (built once from ``post_init``, torn down from ``post_shutdown``)
@@ -54,7 +54,7 @@ class _BackfillResources:
 
     Deliberately optional: if ``PipelineSettings.from_env()`` can't find the pipeline's
     OpenAI/Telegram-channel settings, ``start()`` returns ``None`` and the bot's core
-    source/interest management keeps working without the backfill button. This is a
+    source/interest management keeps working without the pipeline buttons. This is a
     conscious relaxation of "pipeline secrets stay in GitHub Actions, never on the VPS"
     (see deploy/README.md) made specifically so the button can answer synchronously in
     chat, as chosen over an async GitHub Actions dispatch or a DB-queued alternative --
@@ -66,7 +66,7 @@ class _BackfillResources:
         self._telethon_client: TelegramClient | None = None
 
     async def start(self, *, repository: PostgresRepository, bot: Bot) -> PipelineRunner | None:
-        """Build the runner, or leave backfill disabled -- but never let bot startup crash.
+        """Build the runner, or leave pipeline actions disabled without crashing startup.
 
         python-telegram-bot's post_init hook is not guarded against arbitrary exceptions
         (only KeyboardInterrupt/SystemExit pass through untouched); anything else raised
@@ -79,19 +79,19 @@ class _BackfillResources:
         try:
             settings = PipelineSettings.from_env()
         except RuntimeError as exc:
-            logger.warning("in-chat backfill disabled: %s", exc)
+            logger.warning("in-chat pipeline actions disabled: %s", exc)
             return None
         try:
             runner = await self._build(settings, repository=repository, bot=bot)
         except Exception:
-            logger.exception("in-chat backfill disabled: unexpected error during setup")
+            logger.exception("in-chat pipeline actions disabled: unexpected error during setup")
             runner = None
         if runner is None:
             await self.stop()
             self._http_client = None
             self._telethon_client = None
             return None
-        logger.info("in-chat backfill enabled")
+        logger.info("in-chat pipeline actions enabled")
         return runner
 
     async def _build(
@@ -115,7 +115,7 @@ class _BackfillResources:
                 or not settings.telegram_session
             ):
                 logger.warning(
-                    "in-chat backfill disabled: TELEGRAM_API_ID/TELEGRAM_API_HASH/"
+                    "in-chat pipeline actions disabled: TELEGRAM_API_ID/TELEGRAM_API_HASH/"
                     "TELEGRAM_SESSION are required because a Telethon source is configured"
                 )
                 return None
@@ -127,7 +127,9 @@ class _BackfillResources:
             self._telethon_client = telethon_client
             await telethon_client.connect()
             if not await telethon_client.is_user_authorized():
-                logger.warning("in-chat backfill disabled: TELEGRAM_SESSION is not authorized")
+                logger.warning(
+                    "in-chat pipeline actions disabled: TELEGRAM_SESSION is not authorized"
+                )
                 return None
             connectors[CollectorKind.TELETHON] = TelethonConnector(telethon_client)
 
@@ -212,9 +214,9 @@ def build_application(
     resources = _BackfillResources()
 
     async def post_init(application: Application[Any, Any, Any, Any, Any, Any]) -> None:
-        handlers.set_backfill_runner(
-            await resources.start(repository=repository, bot=application.bot)
-        )
+        runner = await resources.start(repository=repository, bot=application.bot)
+        handlers.set_backfill_runner(runner)
+        handlers.set_run_now_runner(runner)
 
     async def post_shutdown(
         _application: Application[Any, Any, Any, Any, Any, Any],
@@ -241,16 +243,19 @@ def build_application(
             )
 
     async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        del context
         query = update.callback_query
         if query is None or update.effective_chat is None or update.effective_user is None:
             return
         await query.answer()
-        await handlers.handle_callback(
+        handle = handlers.handle_callback(
             chat_id=update.effective_chat.id,
             user_id=update.effective_user.id,
             data=query.data or "",
         )
+        if query.data == RUN_NOW:
+            context.application.create_task(handle, update=update)
+            return
+        await handle
 
     async def text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         del context

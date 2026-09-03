@@ -19,6 +19,7 @@ from ai_news_feed.domain.models import (
     DeliveryReceipt,
     Digest,
     DigestItem,
+    DigestSendTime,
     DuplicateKind,
     DuplicateLink,
     InterestProfile,
@@ -338,6 +339,25 @@ class PostgresRepository:
         return await self._cas_update_profile(
             profile_id,
             values={"tone_instructions": normalized_tone},
+            expected_version=expected_version,
+            updated_by_telegram_user_id=updated_by_telegram_user_id,
+        )
+
+    async def update_digest_send_times(
+        self,
+        profile_id: str,
+        *,
+        digest_send_times: tuple[DigestSendTime, ...],
+        expected_version: int,
+        updated_by_telegram_user_id: int | None,
+    ) -> InterestProfile:
+        return await self._cas_update_profile(
+            profile_id,
+            values={
+                "digest_send_times": [
+                    send_time.model_dump(mode="json") for send_time in digest_send_times
+                ]
+            },
             expected_version=expected_version,
             updated_by_telegram_user_id=updated_by_telegram_user_id,
         )
@@ -819,7 +839,11 @@ def _source_from_row(row: RowMapping) -> SourceConfig:
 
 
 def _profile_values(profile: InterestProfile) -> dict[str, Any]:
-    return profile.model_dump(mode="python")
+    values = profile.model_dump(mode="python")
+    values["digest_send_times"] = [
+        send_time.model_dump(mode="json") for send_time in profile.digest_send_times
+    ]
+    return values
 
 
 def _profile_from_row(row: RowMapping) -> InterestProfile:
@@ -832,6 +856,9 @@ def _profile_from_row(row: RowMapping) -> InterestProfile:
         freshness_days=int(row["freshness_days"]),
         summary_length=SummaryLength(row["summary_length"]),
         tone_instructions=row["tone_instructions"],
+        digest_send_times=tuple(
+            DigestSendTime.model_validate(value) for value in row["digest_send_times"]
+        ),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         updated_by_telegram_user_id=row["updated_by_telegram_user_id"],

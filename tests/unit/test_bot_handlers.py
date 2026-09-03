@@ -1,3 +1,4 @@
+import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -14,15 +15,17 @@ from ai_news_feed.bot.handlers import (
     EDIT_FRESHNESS,
     EDIT_INTERESTS,
     EDIT_LENGTH,
+    EDIT_SEND_TIMES,
     EDIT_TONE,
     LIST_SOURCES,
+    RUN_NOW,
     SET_LENGTH_PREFIX,
     SETTINGS_MENU,
     VIEW_INTERESTS,
     BotWorkerHandlers,
     Keyboard,
 )
-from ai_news_feed.domain.models import Material, NewsCluster, ScreeningResult
+from ai_news_feed.domain.models import DigestSendTime, Material, NewsCluster, ScreeningResult
 from ai_news_feed.normalization import content_hash
 from ai_news_feed.storage.memory import InMemoryRepository
 
@@ -55,6 +58,7 @@ class _FakeBackfillReport:
     stored_materials: int
     clusters: int
     digest_posts: int
+    sources: int = 5
 
 
 class _FakeBackfillRunner:
@@ -72,6 +76,29 @@ class _FakeBackfillRunner:
         self.calls.append(min_published_at)
         if self.error is not None:
             raise self.error
+        assert self.report is not None
+        return self.report
+
+
+class _FakeRunNowRunner:
+    def __init__(
+        self,
+        report: _FakeBackfillReport | None = None,
+        *,
+        started: asyncio.Event | None = None,
+        release: asyncio.Event | None = None,
+    ) -> None:
+        self.report = report
+        self.started = started
+        self.release = release
+        self.calls: list[bool] = []
+
+    async def run(self, *, ignore_schedule: bool = False) -> _FakeBackfillReport:
+        self.calls.append(ignore_schedule)
+        if self.started is not None:
+            self.started.set()
+        if self.release is not None:
+            await self.release.wait()
         assert self.report is not None
         return self.report
 
@@ -100,6 +127,7 @@ async def test_bot_adds_lists_rejects_duplicate_and_soft_deletes_source() -> Non
     await handlers.handle_start(chat_id=100, user_id=42)
     assert [button.text for row in api.messages[-1].buttons for button in row] == [
         "⚙️ Настройки",
+        "Прислать всё актуальное",
         "Собрать за период",
         "О боте",
     ]
@@ -181,6 +209,12 @@ async def test_bot_manages_digest_settings() -> None:
     assert "7 дн." in api.messages[-1].text
     assert "Нормально" in api.messages[-1].text
     assert "по умолчанию" in api.messages[-1].text
+    assert "при каждом запуске" in api.messages[-1].text
+    assert any(
+        button.callback_data == EDIT_SEND_TIMES
+        for row in api.messages[-1].buttons
+        for button in row
+    )
 
     await handlers.handle_callback(chat_id=100, user_id=42, data=EDIT_FRESHNESS)
     await handlers.handle_text(chat_id=100, user_id=42, text="not a number")
@@ -209,6 +243,29 @@ async def test_bot_manages_digest_settings() -> None:
     profile = await repository.get_interest_profile("default")
     assert profile.tone_instructions is None
     assert profile.version == 5
+
+    await handlers.handle_callback(chat_id=100, user_id=42, data=EDIT_SEND_TIMES)
+    await handlers.handle_text(chat_id=100, user_id=42, text="несреда 09:00")
+    assert "неизвестный день недели" in api.messages[-1].text.lower()
+    await handlers.handle_text(chat_id=100, user_id=42, text="24:00")
+    assert "от 0 до 23" in api.messages[-1].text
+    await handlers.handle_text(
+        chat_id=100,
+        user_id=42,
+        text="09:00,\nвторник 18:00",
+    )
+    profile = await repository.get_interest_profile("default")
+    assert profile.digest_send_times == (
+        DigestSendTime(hour=9),
+        DigestSendTime(weekday=1, hour=18),
+    )
+    assert profile.version == 6
+
+    await handlers.handle_callback(chat_id=100, user_id=42, data=EDIT_SEND_TIMES)
+    await handlers.handle_text(chat_id=100, user_id=42, text="-")
+    profile = await repository.get_interest_profile("default")
+    assert profile.digest_send_times == ()
+    assert profile.version == 7
 
 
 @pytest.mark.asyncio
@@ -306,6 +363,102 @@ async def test_backfill_rejects_unknown_period() -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_now_requires_pipeline_configuration() -> None:
+    repository = InMemoryRepository()
+    api = _FakeBotAPI()
+    handlers = BotWorkerHandlers(repository=repository, api=api, owner_user_id=42)
+
+    await handlers.handle_callback(chat_id=100, user_id=42, data=RUN_NOW)
+
+    assert "недоступен" in api.messages[-1].text.lower()
+
+
+@pytest.mark.asyncio
+async def test_run_now_overrides_schedule_and_reports_result() -> None:
+    repository = InMemoryRepository()
+    api = _FakeBotAPI()
+    runner = _FakeRunNowRunner(
+        _FakeBackfillReport(
+            sources=7,
+            collected_items=12,
+            extraction_failures=1,
+            stored_materials=4,
+            clusters=2,
+            digest_posts=0,
+        )
+    )
+    handlers = BotWorkerHandlers(
+        repository=repository,
+        api=api,
+        owner_user_id=42,
+        run_now=runner,
+    )
+
+    await handlers.handle_callback(chat_id=100, user_id=42, data=RUN_NOW)
+
+    assert runner.calls == [True]
+    assert api.messages[-2].text == "Запускаю сбор прямо сейчас…"
+    assert "проверено источников 7" in api.messages[-1].text
+    assert "новых материалов 4" in api.messages[-1].text
+    assert "ничего релевантного" in api.messages[-1].text.lower()
+    assert "Ошибок извлечения: 1" in api.messages[-1].text
+
+
+@pytest.mark.asyncio
+async def test_run_now_is_owner_only() -> None:
+    repository = InMemoryRepository()
+    api = _FakeBotAPI()
+    runner = _FakeRunNowRunner()
+    handlers = BotWorkerHandlers(
+        repository=repository,
+        api=api,
+        owner_user_id=42,
+        run_now=runner,
+    )
+
+    await handlers.handle_callback(chat_id=100, user_id=7, data=RUN_NOW)
+
+    assert runner.calls == []
+    assert "нет доступа" in api.messages[-1].text
+
+
+@pytest.mark.asyncio
+async def test_run_now_rejects_parallel_repeat() -> None:
+    repository = InMemoryRepository()
+    api = _FakeBotAPI()
+    started = asyncio.Event()
+    release = asyncio.Event()
+    runner = _FakeRunNowRunner(
+        _FakeBackfillReport(
+            sources=1,
+            collected_items=0,
+            extraction_failures=0,
+            stored_materials=0,
+            clusters=0,
+            digest_posts=0,
+        ),
+        started=started,
+        release=release,
+    )
+    handlers = BotWorkerHandlers(
+        repository=repository,
+        api=api,
+        owner_user_id=42,
+        run_now=runner,
+    )
+
+    first = asyncio.create_task(handlers.handle_callback(chat_id=100, user_id=42, data=RUN_NOW))
+    await started.wait()
+    await handlers.handle_callback(chat_id=100, user_id=42, data=RUN_NOW)
+
+    assert runner.calls == [True]
+    assert api.messages[-1].text == "Уже выполняется."
+    release.set()
+    await first
+    assert "ничего нового" in api.messages[-1].text.lower()
+
+
+@pytest.mark.asyncio
 async def test_add_source_keeps_pending_state_after_invalid_input() -> None:
     """Regression: handle_text used to clear the pending action unconditionally,
     even when the handler rejected the input and expected a retry (invalid source
@@ -336,6 +489,7 @@ async def test_bot_settings_menu_and_about_screen() -> None:
     await handlers.handle_start(chat_id=100, user_id=42)
     assert [button.text for row in api.messages[-1].buttons for button in row] == [
         "⚙️ Настройки",
+        "Прислать всё актуальное",
         "Собрать за период",
         "О боте",
     ]
@@ -355,6 +509,7 @@ async def test_bot_settings_menu_and_about_screen() -> None:
     assert "AI News Feed" in api.messages[-1].text
     assert [button.text for row in api.messages[-1].buttons for button in row] == [
         "⚙️ Настройки",
+        "Прислать всё актуальное",
         "Собрать за период",
         "О боте",
     ]

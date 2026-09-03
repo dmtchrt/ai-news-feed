@@ -7,6 +7,7 @@ from ai_news_feed.domain.models import (
     CollectionBatch,
     CollectionCursor,
     CollectorKind,
+    DigestSendTime,
     RawItem,
     SourceConfig,
     SourceKind,
@@ -56,6 +57,19 @@ def test_explicit_cursor_is_json_serializable() -> None:
         "external_id": None,
         "message_id": 42,
     }
+
+
+def test_digest_send_time_validates_weekday_and_hour() -> None:
+    assert DigestSendTime(hour=9).model_dump(mode="json") == {
+        "weekday": None,
+        "hour": 9,
+    }
+    assert DigestSendTime(weekday=1, hour=23).weekday == 1
+
+    with pytest.raises(ValidationError):
+        DigestSendTime(weekday=7, hour=9)
+    with pytest.raises(ValidationError):
+        DigestSendTime(weekday=1, hour=24)
 
 
 class _ExampleConnector:

@@ -37,6 +37,13 @@ class SummaryLength(StrEnum):
     DETAILED = "detailed"
 
 
+class DigestSendTime(ContractModel):
+    """One digest delivery slot in Europe/Moscow local time."""
+
+    weekday: int | None = Field(default=None, ge=0, le=6)
+    hour: int = Field(ge=0, le=23)
+
+
 class AttachmentKind(StrEnum):
     DOCUMENT = "document"
     IMAGE = "image"
@@ -172,6 +179,7 @@ class InterestProfile(ContractModel):
     freshness_days: int = Field(default=7, ge=1, le=365)
     summary_length: SummaryLength = SummaryLength.NORMAL
     tone_instructions: str | None = None
+    digest_send_times: tuple[DigestSendTime, ...] = ()
     created_at: datetime
     updated_at: datetime
     updated_by_telegram_user_id: int | None = Field(default=None, ge=1)

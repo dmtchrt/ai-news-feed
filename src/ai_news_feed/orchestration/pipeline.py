@@ -5,10 +5,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Protocol, cast
+from zoneinfo import ZoneInfo
 
 import httpx
 from telegram import Bot
@@ -18,7 +19,13 @@ from telethon.sessions import StringSession
 from ai_news_feed.dedup.semantic import DEFAULT_MODEL, SemanticClusterer
 from ai_news_feed.delivery.telegram import TelegramBotAPI, TelegramDelivery
 from ai_news_feed.digest import DigestComposer
-from ai_news_feed.domain.models import CollectorKind, DeliveryReceipt, Digest, InterestProfile
+from ai_news_feed.domain.models import (
+    CollectorKind,
+    DeliveryReceipt,
+    Digest,
+    DigestSendTime,
+    InterestProfile,
+)
 from ai_news_feed.extraction import ContentExtractor, ExtractedItem
 from ai_news_feed.llm.openai import OpenAIResponsesClient
 from ai_news_feed.processing import AIProcessingResult, AIProcessor, ExtractedRawItem
@@ -32,6 +39,9 @@ from ai_news_feed.storage.postgres import PostgresRepository
 from ai_news_feed.summarization import ClusterSummarizer
 
 logger = logging.getLogger(__name__)
+
+_DIGEST_TIMEZONE = ZoneInfo("Europe/Moscow")
+_PIPELINE_INTERVAL = timedelta(hours=6)
 
 
 class Processor(Protocol):
@@ -72,6 +82,7 @@ class PipelineRunner:
         interest_profile_id: str = "default",
         extractor: ContentExtractor | None = None,
         composer: DigestComposer | None = None,
+        now: Callable[[], datetime] | None = None,
     ) -> None:
         self._repository = repository
         self._connectors = connectors
@@ -81,13 +92,24 @@ class PipelineRunner:
         self._profile_id = interest_profile_id
         self._extractor = extractor or ContentExtractor()
         self._composer = composer or DigestComposer()
+        self._now = now or (lambda: datetime.now(UTC))
 
-    async def run(self) -> PipelineRunReport:
-        pending = await self._repository.list_pending_digests()
-        for pending_digest in pending:
-            await self._delivery.send(pending_digest)
-
+    async def run(self, *, ignore_schedule: bool = False) -> PipelineRunReport:
         sources, profile = await self._repository.load_context(self._profile_id)
+        should_deliver = ignore_schedule or digest_delivery_is_due(
+            profile.digest_send_times,
+            now=self._now(),
+        )
+        pending = await self._repository.list_pending_digests()
+        delivered_posts = 0
+        resumed_digests = 0
+        if should_deliver:
+            for pending_digest in pending:
+                pending_posts = await self._repository.list_pending_digest_posts(pending_digest.id)
+                await self._delivery.send(pending_digest)
+                delivered_posts += len(pending_posts)
+                resumed_digests += 1
+
         extracted: list[ExtractedRawItem] = []
         cursor_updates = {}
         collected_items = 0
@@ -145,8 +167,9 @@ class PipelineRunner:
             digest=digest,
             channel_id=str(self._channel_id) if digest is not None else None,
         )
-        if digest is not None:
+        if digest is not None and should_deliver:
             await self._delivery.send(digest)
+            delivered_posts += len(digest.posts)
 
         await self._repository.save_processing_result(
             materials=(),
@@ -163,8 +186,8 @@ class PipelineRunner:
             extraction_failures=extraction_failures,
             stored_materials=len(processing.materials),
             clusters=len(processing.cluster_batch.clusters),
-            digest_posts=len(digest.posts) if digest is not None else 0,
-            resumed_digests=len(pending),
+            digest_posts=delivered_posts,
+            resumed_digests=resumed_digests,
         )
 
     async def run_backfill(self, *, min_published_at: datetime) -> PipelineRunReport:
@@ -394,3 +417,34 @@ def _required_env(name: str) -> str:
     if not value:
         raise RuntimeError(f"{name} is required")
     return value
+
+
+def digest_delivery_is_due(
+    send_times: Sequence[DigestSendTime],
+    *,
+    now: datetime,
+) -> bool:
+    """Return whether this is the first six-hour run after a configured local slot."""
+    if not send_times:
+        return True
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("now must be timezone-aware")
+
+    local_now = now.astimezone(_DIGEST_TIMEZONE)
+    previous_run = local_now - _PIPELINE_INTERVAL
+    for send_time in send_times:
+        days_since_slot = (
+            0 if send_time.weekday is None else (local_now.weekday() - send_time.weekday) % 7
+        )
+        occurrence = local_now.replace(
+            hour=send_time.hour,
+            minute=0,
+            second=0,
+            microsecond=0,
+        ) - timedelta(days=days_since_slot)
+        cycle = timedelta(days=1 if send_time.weekday is None else 7)
+        if occurrence > local_now:
+            occurrence -= cycle
+        if previous_run < occurrence <= local_now:
+            return True
+    return False
