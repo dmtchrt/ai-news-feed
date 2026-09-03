@@ -8,11 +8,18 @@ import json
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
 
 from ai_news_feed.domain.models import Digest, DigestItem
 
 TELEGRAM_TEXT_LIMIT = 4096
 DEFAULT_HEADER = "AI News Feed"
+# Source pages and Telegram channels display local Moscow time. published_at is stored
+# in UTC (see domain/models.py), which is correct for storage, but formatting it as UTC
+# for display made every digest date look one day early for anything published between
+# 00:00 and 02:59 MSK (that window is still "yesterday" in UTC). Convert to Moscow time
+# for display only, so the printed date matches what a human sees on the source page.
+_DISPLAY_TIMEZONE = ZoneInfo("Europe/Moscow")
 
 
 class DigestComposer:
@@ -88,13 +95,22 @@ def _format_item(item: DigestItem) -> str:
         anchor = f'<a href="{html.escape(url, quote=True)}">{html.escape(_link_label(url))}</a>'
         lines.append(f"{index}. {anchor}")
         if dates is not None:
-            lines.append(dates[index - 1].strftime("%d.%m.%Y"))
+            local_date = dates[index - 1].astimezone(_DISPLAY_TIMEZONE)
+            lines.append(local_date.strftime("%d.%m.%Y"))
     links = "\n".join(lines)
     return f"• {html.escape(item.summary)}\nИсточники:\n{links}"
 
 
 def _link_label(url: str) -> str:
-    netloc = urlsplit(url).netloc.removeprefix("www.")
+    parts = urlsplit(url)
+    netloc = parts.netloc.removeprefix("www.")
+    if netloc in {"t.me", "telegram.me"}:
+        # The bare domain is the same for every Telegram source, so it tells the reader
+        # nothing about which channel a link actually goes to. Pull the channel handle
+        # out of the path instead (strip a leading "s/" from web-preview-style URLs).
+        handle = parts.path.strip("/").removeprefix("s/").split("/", maxsplit=1)[0]
+        if handle:
+            return f"t.me/{handle}"
     return netloc or url
 
 

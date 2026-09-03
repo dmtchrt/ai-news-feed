@@ -7,6 +7,7 @@ import re
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 from bs4 import BeautifulSoup, Tag
@@ -300,7 +301,8 @@ def _parse_datetime(value: str, formats: tuple[str, ...]) -> datetime | None:
             return _ensure_utc(datetime.strptime(normalized, date_format))
         except ValueError:
             continue
-    return _parse_russian_date(normalized)
+    russian_date = _parse_russian_date(normalized)
+    return _ensure_utc(russian_date) if russian_date is not None else None
 
 
 _RUSSIAN_MONTHS = {
@@ -336,11 +338,13 @@ def _parse_russian_date(value: str) -> datetime | None:
         int(match.group("day")),
         int(match.group("hour") or 0),
         int(match.group("minute") or 0),
-        tzinfo=UTC,
     )
+
+
+_SOURCE_LOCAL_TIMEZONE = ZoneInfo("Europe/Moscow")
 
 
 def _ensure_utc(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
-        return value.replace(tzinfo=UTC)
+        return value.replace(tzinfo=_SOURCE_LOCAL_TIMEZONE).astimezone(UTC)
     return value.astimezone(UTC)

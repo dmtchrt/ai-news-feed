@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
@@ -5,7 +6,7 @@ import pytest
 
 from ai_news_feed.extraction import ContentExtractor, ExtractedItem
 from ai_news_feed.sources.presets import ict_moscow_source
-from ai_news_feed.sources.site import UniversalSiteConnector
+from ai_news_feed.sources.site import UniversalSiteConnector, _ensure_utc
 
 
 @pytest.mark.asyncio
@@ -64,3 +65,17 @@ async def test_listing_fetch_error_with_empty_str_still_yields_valid_error() -> 
     assert len(batch.errors) == 1
     assert batch.errors[0].code == "listing_fetch_failed"
     assert batch.errors[0].message == "ConnectError"
+
+
+def test_ensure_utc_treats_naive_datetime_as_moscow_local_time() -> None:
+    """Regression: a scraped date with no explicit UTC offset -- the normal case on
+    RU sites, which print local time with no timezone suffix at all -- used to be
+    labeled UTC directly instead of converted from Moscow time. For anything
+    published 00:00-02:59 MSK that silently rolled the stored date back a day."""
+    naive = datetime(2026, 9, 2, 1, 0)
+    assert _ensure_utc(naive) == datetime(2026, 9, 1, 22, 0, tzinfo=UTC)
+
+
+def test_ensure_utc_keeps_an_explicit_offset_unchanged_in_value() -> None:
+    aware = datetime(2026, 9, 2, 1, 0, tzinfo=UTC)
+    assert _ensure_utc(aware) == aware

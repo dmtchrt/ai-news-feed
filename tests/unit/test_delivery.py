@@ -145,6 +145,47 @@ def test_digest_item_pairs_each_link_with_its_own_date_in_order() -> None:
     )
 
 
+def test_digest_item_date_shows_moscow_calendar_day_not_utc() -> None:
+    """Regression: source pages and Telegram channels show local Moscow time, but
+    dates used to be formatted straight from the stored UTC value. 22:00 UTC on the
+    1st is already 01:00 MSK on the 2nd -- displaying it as the 1st made the digest
+    look a day behind whatever a human sees when they click through."""
+    composer = DigestComposer()
+    item = _item(1, source_published_ats=(datetime(2026, 9, 1, 22, 0, tzinfo=UTC),))
+
+    digest = composer.compose(
+        [item],
+        profile_id="default",
+        profile_version=1,
+        created_at=datetime(2026, 9, 2, tzinfo=UTC),
+    )
+
+    assert digest is not None
+    sources_section = digest.posts[0].split("Источники:\n", 1)[1]
+    assert "02.09.2026" in sources_section
+    assert "01.09.2026" not in sources_section
+
+
+def test_digest_item_telegram_link_shows_channel_handle_not_bare_domain() -> None:
+    """Regression: every Telegram link's visible label collapsed to the bare "t.me"
+    domain, which is identical for every channel and does not say which one a link
+    actually points to."""
+    composer = DigestComposer()
+    item = _item(1, source_links=("https://t.me/ailev_blog/1234",))
+
+    digest = composer.compose(
+        [item],
+        profile_id="default",
+        profile_version=1,
+        created_at=datetime(2026, 9, 2, tzinfo=UTC),
+    )
+
+    assert digest is not None
+    sources_section = digest.posts[0].split("Источники:\n", 1)[1]
+    assert ">t.me/ailev_blog<" in sources_section
+    assert ">t.me<" not in sources_section
+
+
 def test_digest_item_escapes_html_special_characters_in_summary_and_link_label() -> None:
     composer = DigestComposer()
     item = _item(
