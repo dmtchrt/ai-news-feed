@@ -12,7 +12,7 @@ from typing import Protocol, cast
 from zoneinfo import ZoneInfo
 
 import httpx
-from telegram import Bot
+from telegram.ext import AIORateLimiter, ExtBot
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 
@@ -457,7 +457,10 @@ async def run_from_env() -> PipelineRunReport:
                 screener=ClusterScreener(screening_client),
                 summarizer=ClusterSummarizer(summary_client),
             )
-            async with Bot(settings.telegram_bot_token) as bot:
+            async with ExtBot(
+                token=settings.telegram_bot_token,
+                rate_limiter=AIORateLimiter(max_retries=1),
+            ) as bot:
                 delivery = TelegramDelivery(
                     bot=cast(TelegramBotAPI, bot),
                     repository=repository,

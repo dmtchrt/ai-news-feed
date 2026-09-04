@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import pytest
+from telegram.error import RetryAfter
 
 from ai_news_feed.delivery.telegram import TelegramDelivery, TelegramDeliveryError
 from ai_news_feed.digest import DigestComposer
@@ -32,9 +33,15 @@ class _SentMessage:
 
 
 class _FakeTelegramBot:
-    def __init__(self, *, fail_on_call: int | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        fail_on_call: int | None = None,
+        retry_after_on_calls: set[int] | None = None,
+    ) -> None:
         self.calls: list[tuple[str | int, str, str | None, bool]] = []
         self.fail_on_call = fail_on_call
+        self.retry_after_on_calls = retry_after_on_calls or set()
 
     async def send_message(
         self,
@@ -47,6 +54,8 @@ class _FakeTelegramBot:
         self.calls.append((chat_id, text, parse_mode, disable_web_page_preview))
         if self.fail_on_call == len(self.calls):
             raise RuntimeError("fake Telegram outage")
+        if len(self.calls) in self.retry_after_on_calls:
+            raise RetryAfter(retry_after=30)
         return _SentMessage(message_id=1000 + len(self.calls))
 
 
@@ -270,3 +279,74 @@ async def test_delivery_retry_skips_already_confirmed_posts() -> None:
 
     assert len(retry_bot.calls) == 1
     assert receipt.telegram_message_ids == (1001, 1001)
+
+
+@pytest.mark.asyncio
+async def test_delivery_retries_same_post_after_flood_control(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PTB_TIMEDELTA", "true")
+    digest = DigestComposer(max_post_chars=160).compose(
+        [_item(1), _item(2)],
+        profile_id="default",
+        profile_version=1,
+        created_at=datetime(2026, 8, 31, tzinfo=UTC),
+    )
+    assert digest is not None
+    assert len(digest.posts) == 2
+    repository = InMemoryRepository()
+    bot = _FakeTelegramBot(retry_after_on_calls={2})
+    sleep_calls: list[float] = []
+
+    async def fake_sleep(delay_seconds: float) -> None:
+        sleep_calls.append(delay_seconds)
+
+    receipt = await TelegramDelivery(
+        bot=bot,
+        repository=repository,
+        channel_id=-100123,
+        clock=lambda: datetime(2026, 8, 31, 12, tzinfo=UTC),
+        retry_after_buffer_seconds=0.1,
+        sleep=fake_sleep,
+    ).send(digest)
+
+    assert len(bot.calls) == 3
+    assert bot.calls[1][1] == bot.calls[2][1]
+    assert sleep_calls == [30.1]
+    assert receipt.telegram_message_ids == (1001, 1003)
+
+
+@pytest.mark.asyncio
+async def test_delivery_raises_after_flood_control_retries_are_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PTB_TIMEDELTA", "true")
+    digest = DigestComposer().compose(
+        [_item(1)],
+        profile_id="default",
+        profile_version=1,
+        created_at=datetime(2026, 8, 31, tzinfo=UTC),
+    )
+    assert digest is not None
+    repository = InMemoryRepository()
+    bot = _FakeTelegramBot(retry_after_on_calls={1, 2, 3})
+    sleep_calls: list[float] = []
+
+    async def fake_sleep(delay_seconds: float) -> None:
+        sleep_calls.append(delay_seconds)
+
+    delivery = TelegramDelivery(
+        bot=bot,
+        repository=repository,
+        channel_id=-100123,
+        max_retries=2,
+        sleep=fake_sleep,
+    )
+
+    with pytest.raises(TelegramDeliveryError, match="post 0"):
+        await delivery.send(digest)
+
+    pending = await repository.list_pending_digest_posts(digest.id)
+    assert len(bot.calls) == 3
+    assert sleep_calls == [30.1, 30.1]
+    assert [post.position for post in pending] == [0]
