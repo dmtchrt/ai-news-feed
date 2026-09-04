@@ -25,7 +25,12 @@ from telegram.ext import (
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 
-from ai_news_feed.bot.handlers import RUN_NOW, BotWorkerHandlers, Keyboard
+from ai_news_feed.bot.handlers import (
+    RUN_NOW,
+    UNEXPECTED_ERROR_MESSAGE,
+    BotWorkerHandlers,
+    Keyboard,
+)
 from ai_news_feed.dedup.semantic import SemanticClusterer
 from ai_news_feed.delivery.telegram import TelegramBotAPI, TelegramDelivery
 from ai_news_feed.domain.models import CollectorKind
@@ -283,6 +288,31 @@ def build_application(
             forward_missing_username=forward_missing_username,
         )
 
+    async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        chat_id = (
+            update.effective_chat.id
+            if isinstance(update, Update) and update.effective_chat is not None
+            else None
+        )
+        logger.error(
+            "source=%s code=%s chat_id=%s",
+            "telegram-application",
+            "unhandled_error",
+            chat_id,
+            exc_info=context.error,
+        )
+        if chat_id is None:
+            return
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=UNEXPECTED_ERROR_MESSAGE)
+        except Exception:
+            logger.exception(
+                "source=%s code=%s chat_id=%s",
+                "telegram-application",
+                "fallback_send_failed",
+                chat_id,
+            )
+
     application.add_handler(CommandHandler("start", start, filters=filters.ChatType.PRIVATE))
     application.add_handler(CallbackQueryHandler(callback))
     application.add_handler(
@@ -291,6 +321,7 @@ def build_application(
             text,
         )
     )
+    application.add_error_handler(error_handler)
     return application
 
 

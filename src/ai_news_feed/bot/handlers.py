@@ -38,6 +38,7 @@ RUN_NOW = "menu:run-now"
 CHECK_SCREENING = "menu:check-screening"
 SETTINGS_MENU = "menu:settings"
 ABOUT = "menu:about"
+UNEXPECTED_ERROR_MESSAGE = "Что-то пошло не так, попробуйте ещё раз позже."
 
 logger = logging.getLogger(__name__)
 
@@ -180,6 +181,19 @@ class BotWorkerHandlers:
         self._pending: dict[tuple[int, int], _PendingState] = {}
 
     async def handle_start(self, *, chat_id: int, user_id: int) -> None:
+        try:
+            await self._handle_start(chat_id=chat_id, user_id=user_id)
+        except Exception:
+            logger.exception(
+                "source=%s code=%s handler=%s chat_id=%s",
+                "bot-worker",
+                "unexpected_error",
+                "handle_start",
+                chat_id,
+            )
+            await self._send_unexpected_error(chat_id=chat_id, handler="handle_start")
+
+    async def _handle_start(self, *, chat_id: int, user_id: int) -> None:
         if not await self._authorize(chat_id, user_id):
             return
         await self._api.send_message(
@@ -189,6 +203,20 @@ class BotWorkerHandlers:
         )
 
     async def handle_callback(self, *, chat_id: int, user_id: int, data: str) -> None:
+        try:
+            await self._handle_callback(chat_id=chat_id, user_id=user_id, data=data)
+        except Exception:
+            logger.exception(
+                "source=%s code=%s handler=%s chat_id=%s callback_data=%r",
+                "bot-worker",
+                "unexpected_error",
+                "handle_callback",
+                chat_id,
+                data,
+            )
+            await self._send_unexpected_error(chat_id=chat_id, handler="handle_callback")
+
+    async def _handle_callback(self, *, chat_id: int, user_id: int, data: str) -> None:
         if not await self._authorize(chat_id, user_id):
             return
         key = (chat_id, user_id)
@@ -304,6 +332,34 @@ class BotWorkerHandlers:
         forwarded_channel_username: str | None = None,
         forward_missing_username: bool = False,
     ) -> None:
+        try:
+            await self._handle_text(
+                chat_id=chat_id,
+                user_id=user_id,
+                text=text,
+                forwarded_channel_username=forwarded_channel_username,
+                forward_missing_username=forward_missing_username,
+            )
+        except Exception:
+            logger.exception(
+                "source=%s code=%s handler=%s chat_id=%s text=%r",
+                "bot-worker",
+                "unexpected_error",
+                "handle_text",
+                chat_id,
+                text,
+            )
+            await self._send_unexpected_error(chat_id=chat_id, handler="handle_text")
+
+    async def _handle_text(
+        self,
+        *,
+        chat_id: int,
+        user_id: int,
+        text: str,
+        forwarded_channel_username: str | None = None,
+        forward_missing_username: bool = False,
+    ) -> None:
         if not await self._authorize(chat_id, user_id):
             return
         key = (chat_id, user_id)
@@ -357,6 +413,18 @@ class BotWorkerHandlers:
         # through to "Выберите действие кнопкой" instead of being read as the retry.
         if done:
             self._pending.pop(key, None)
+
+    async def _send_unexpected_error(self, *, chat_id: int, handler: str) -> None:
+        try:
+            await self._api.send_message(chat_id, UNEXPECTED_ERROR_MESSAGE)
+        except Exception:
+            logger.exception(
+                "source=%s code=%s handler=%s chat_id=%s",
+                "bot-worker",
+                "fallback_send_failed",
+                handler,
+                chat_id,
+            )
 
     async def _add_source(
         self,

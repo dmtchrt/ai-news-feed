@@ -21,11 +21,18 @@ from ai_news_feed.bot.handlers import (
     RUN_NOW,
     SET_LENGTH_PREFIX,
     SETTINGS_MENU,
+    UNEXPECTED_ERROR_MESSAGE,
     VIEW_INTERESTS,
     BotWorkerHandlers,
     Keyboard,
 )
-from ai_news_feed.domain.models import DigestSendTime, Material, NewsCluster, ScreeningResult
+from ai_news_feed.domain.models import (
+    DigestSendTime,
+    Material,
+    NewsCluster,
+    ScreeningResult,
+    SourceConfig,
+)
 from ai_news_feed.normalization import content_hash
 from ai_news_feed.storage.memory import InMemoryRepository
 
@@ -49,6 +56,38 @@ class _FakeBotAPI:
         buttons: Keyboard = (),
     ) -> None:
         self.messages.append(_Message(chat_id, text, buttons))
+
+
+class _FailingBotAPI:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def send_message(
+        self,
+        chat_id: int,
+        text: str,
+        *,
+        buttons: Keyboard = (),
+    ) -> None:
+        del chat_id, text, buttons
+        self.calls += 1
+        raise RuntimeError("Telegram is unavailable")
+
+
+class _FailingRepository(InMemoryRepository):
+    def __init__(self, *, fail_on: str) -> None:
+        super().__init__()
+        self._fail_on = fail_on
+
+    async def list_sources(self, *, include_disabled: bool = False) -> tuple[SourceConfig, ...]:
+        if self._fail_on == "list_sources":
+            raise RuntimeError("unexpected repository failure")
+        return await super().list_sources(include_disabled=include_disabled)
+
+    async def add_source(self, source: SourceConfig) -> SourceConfig:
+        if self._fail_on == "add_source":
+            raise RuntimeError("unexpected repository failure")
+        return await super().add_source(source)
 
 
 @dataclass(frozen=True)
@@ -116,6 +155,41 @@ def _material(material_id: str, published_at: datetime) -> Material:
         text=text,
         content_hash=content_hash(text),
     )
+
+
+@pytest.mark.asyncio
+async def test_callback_unexpected_repository_error_sends_fallback() -> None:
+    repository = _FailingRepository(fail_on="list_sources")
+    api = _FakeBotAPI()
+    handlers = BotWorkerHandlers(repository=repository, api=api, owner_user_id=42)
+
+    await handlers.handle_callback(chat_id=100, user_id=42, data=LIST_SOURCES)
+
+    assert [message.text for message in api.messages] == [UNEXPECTED_ERROR_MESSAGE]
+
+
+@pytest.mark.asyncio
+async def test_text_unexpected_repository_error_sends_fallback() -> None:
+    repository = _FailingRepository(fail_on="add_source")
+    api = _FakeBotAPI()
+    handlers = BotWorkerHandlers(repository=repository, api=api, owner_user_id=42)
+    await handlers.handle_callback(chat_id=100, user_id=42, data=ADD_SOURCE)
+    api.messages.clear()
+
+    await handlers.handle_text(chat_id=100, user_id=42, text="@ailev_blog")
+
+    assert [message.text for message in api.messages] == [UNEXPECTED_ERROR_MESSAGE]
+
+
+@pytest.mark.asyncio
+async def test_fallback_send_failure_does_not_escape_handler() -> None:
+    repository = InMemoryRepository()
+    api = _FailingBotAPI()
+    handlers = BotWorkerHandlers(repository=repository, api=api, owner_user_id=42)
+
+    await handlers.handle_start(chat_id=100, user_id=42)
+
+    assert api.calls == 2
 
 
 @pytest.mark.asyncio
