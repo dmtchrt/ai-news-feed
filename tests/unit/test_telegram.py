@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -93,14 +94,17 @@ class _FakeMessage:
 
 
 class _AsyncMessages:
-    def __init__(self, messages: list[_FakeMessage]) -> None:
+    def __init__(self, messages: list[_FakeMessage], delay_seconds: float = 0) -> None:
         self._messages = messages
+        self._delay_seconds = delay_seconds
 
     def __aiter__(self) -> _AsyncMessages:
         self._iterator = iter(self._messages)
         return self
 
     async def __anext__(self) -> _FakeMessage:
+        if self._delay_seconds:
+            await asyncio.sleep(self._delay_seconds)
         try:
             return next(self._iterator)
         except StopIteration as exc:
@@ -108,17 +112,31 @@ class _AsyncMessages:
 
 
 class _FakeTelethonClient:
-    def __init__(self, messages: list[_FakeMessage], document_path: Path) -> None:
+    def __init__(
+        self,
+        messages: list[_FakeMessage],
+        document_path: Path,
+        *,
+        iteration_delay_seconds: float = 0,
+        download_delay_seconds: float = 0,
+    ) -> None:
         self.messages = messages
         self.document_path = document_path
+        self.iteration_delay_seconds = iteration_delay_seconds
+        self.download_delay_seconds = download_delay_seconds
         self.iter_call: dict[str, Any] = {}
 
     def iter_messages(self, handle: str, **kwargs: Any) -> _AsyncMessages:
         self.iter_call = {"handle": handle, **kwargs}
         min_id = int(kwargs["min_id"])
-        return _AsyncMessages([message for message in self.messages if message.id > min_id])
+        return _AsyncMessages(
+            [message for message in self.messages if message.id > min_id],
+            delay_seconds=self.iteration_delay_seconds,
+        )
 
     async def download_media(self, message: _FakeMessage, file: str) -> str:
+        if self.download_delay_seconds:
+            await asyncio.sleep(self.download_delay_seconds)
         copyfile(self.document_path, file)
         return file
 
@@ -159,6 +177,63 @@ async def test_telethon_downloads_expertosphere_docx_and_extractor_reads_it(
     assert isinstance(extracted, ExtractedItem)
     assert "Новый отраслевой отчёт" in extracted.text
     assert "Объём рынка вырос" in extracted.text
+
+
+@pytest.mark.asyncio
+async def test_telethon_media_download_timeout_returns_retryable_error(tmp_path: Path) -> None:
+    report_path = tmp_path / "market-report.docx"
+    report_path.touch()
+    message = _FakeMessage(
+        id=502,
+        date=datetime(2026, 8, 31, 7, 0, tzinfo=UTC),
+        message="Новый отчёт",
+        document=object(),
+        file=_FakeFile(
+            name="market-report.docx",
+            mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            size=12345,
+            ext=".docx",
+        ),
+    )
+    client = _FakeTelethonClient(
+        [message],
+        report_path,
+        download_delay_seconds=0.05,
+    )
+    config = expertosphere_source().model_copy(update={"settings": {"timeout_seconds": 0.01}})
+
+    batch = await asyncio.wait_for(
+        TelethonConnector(client, download_dir=tmp_path / "downloads").collect(config),
+        timeout=0.5,
+    )
+
+    assert len(batch.raw_items) == 1
+    assert batch.raw_items[0].attachments[0].download_ref is None
+    assert len(batch.errors) == 1
+    assert batch.errors[0].code == "attachment_download_failed"
+    assert batch.errors[0].retryable
+    assert batch.errors[0].message == "Telethon media download timed out after 0.01 seconds"
+
+
+@pytest.mark.asyncio
+async def test_telethon_message_iteration_timeout_returns_retryable_error(tmp_path: Path) -> None:
+    client = _FakeTelethonClient(
+        [],
+        tmp_path / "unused",
+        iteration_delay_seconds=0.05,
+    )
+    config = expertosphere_source().model_copy(update={"settings": {"timeout_seconds": 0.01}})
+
+    batch = await asyncio.wait_for(
+        TelethonConnector(client, download_dir=tmp_path / "downloads").collect(config),
+        timeout=0.5,
+    )
+
+    assert not batch.raw_items
+    assert len(batch.errors) == 1
+    assert batch.errors[0].code == "telethon_collect_failed"
+    assert batch.errors[0].retryable
+    assert batch.errors[0].message == ("Telethon message iteration timed out after 0.01 seconds")
 
 
 class _FailingDownloadTelethonClient:
@@ -203,6 +278,6 @@ async def test_attachment_download_error_with_empty_str_still_yields_valid_error
     assert batch.next_cursor == CollectionCursor(message_id=502)
     assert len(batch.errors) == 1
     assert batch.errors[0].code == "attachment_download_failed"
-    assert batch.errors[0].message == "TimeoutError"
+    assert batch.errors[0].message == "Telethon media download timed out after 60 seconds"
     assert "Ещё один отчёт" in (batch.raw_items[0].raw_text or "")
     assert batch.raw_items[0].attachments[0].download_ref is None

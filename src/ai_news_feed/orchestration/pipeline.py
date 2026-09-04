@@ -20,6 +20,8 @@ from ai_news_feed.dedup.semantic import DEFAULT_MODEL, SemanticClusterer
 from ai_news_feed.delivery.telegram import TelegramBotAPI, TelegramDelivery
 from ai_news_feed.digest import DigestComposer
 from ai_news_feed.domain.models import (
+    CollectionBatch,
+    CollectionError,
     CollectorKind,
     DeliveryReceipt,
     Digest,
@@ -30,6 +32,7 @@ from ai_news_feed.extraction import ContentExtractor, ExtractedItem
 from ai_news_feed.llm.openai import OpenAIResponsesClient
 from ai_news_feed.processing import AIProcessingResult, AIProcessor, ExtractedRawItem
 from ai_news_feed.screening import ClusterScreener
+from ai_news_feed.sources._shared import error_message
 from ai_news_feed.sources.base import SourceConnector
 from ai_news_feed.sources.rss import NativeRssConnector, RssBridgeConnector
 from ai_news_feed.sources.site import UniversalSiteConnector
@@ -106,6 +109,11 @@ class PipelineRunner:
         if should_deliver:
             for pending_digest in pending:
                 pending_posts = await self._repository.list_pending_digest_posts(pending_digest.id)
+                logger.info(
+                    "sending pending digest: digest_id=%s posts=%d",
+                    pending_digest.id,
+                    len(pending_posts),
+                )
                 await self._delivery.send(pending_digest)
                 delivered_posts += len(pending_posts)
                 resumed_digests += 1
@@ -121,7 +129,20 @@ class PipelineRunner:
                 raise RuntimeError(
                     f"collector {source.collector.value} is not configured for source {source.id}"
                 ) from exc
-            batch = await connector.collect(source, source.cursor)
+            try:
+                batch = await connector.collect(source, source.cursor)
+            except Exception as exc:
+                logger.exception("source=%s collector crashed", source.id)
+                batch = CollectionBatch(
+                    errors=(
+                        CollectionError(
+                            source_id=source.id,
+                            code="collector_crashed",
+                            message=error_message(exc),
+                            retryable=True,
+                        ),
+                    ),
+                )
             collected_items += len(batch.raw_items)
             for error in batch.errors:
                 logger.warning(
@@ -147,10 +168,24 @@ class PipelineRunner:
                         result.message,
                     )
 
+        logger.info(
+            "collection completed: sources=%d collected_items=%d extracted_items=%d "
+            "extraction_failures=%d",
+            len(sources),
+            collected_items,
+            len(extracted),
+            extraction_failures,
+        )
         processing = await self._processor.process(
             extracted,
             interest_profile_id=profile.id,
             interest_profile=profile,
+        )
+        logger.info(
+            "processing completed: materials=%d clusters=%d digest_items=%d",
+            len(processing.materials),
+            len(processing.cluster_batch.clusters),
+            len(processing.digest_items),
         )
         digest = self._composer.compose(
             processing.digest_items,
@@ -168,6 +203,11 @@ class PipelineRunner:
             channel_id=str(self._channel_id) if digest is not None else None,
         )
         if digest is not None and should_deliver:
+            logger.info(
+                "sending digest: digest_id=%s posts=%d",
+                digest.id,
+                len(digest.posts),
+            )
             await self._delivery.send(digest)
             delivered_posts += len(digest.posts)
 
@@ -223,7 +263,20 @@ class PipelineRunner:
             # sources/_shared.py). A source config with its own cursor cleared is what
             # actually makes the connector treat this as a fresh, unfiltered snapshot.
             wide_source = source.model_copy(update={"cursor": None})
-            batch = await connector.collect(wide_source, cursor=None)
+            try:
+                batch = await connector.collect(wide_source, cursor=None)
+            except Exception as exc:
+                logger.exception("backfill source=%s collector crashed", source.id)
+                batch = CollectionBatch(
+                    errors=(
+                        CollectionError(
+                            source_id=source.id,
+                            code="collector_crashed",
+                            message=error_message(exc),
+                            retryable=True,
+                        ),
+                    ),
+                )
             collected_items += len(batch.raw_items)
             for error in batch.errors:
                 logger.warning(
@@ -249,11 +302,25 @@ class PipelineRunner:
                         result.message,
                     )
 
+        logger.info(
+            "backfill collection completed: sources=%d collected_items=%d extracted_items=%d "
+            "extraction_failures=%d",
+            len(sources),
+            collected_items,
+            len(extracted),
+            extraction_failures,
+        )
         processing = await self._processor.process(
             extracted,
             interest_profile_id=profile.id,
             interest_profile=profile,
             min_published_at=min_published_at,
+        )
+        logger.info(
+            "backfill processing completed: materials=%d clusters=%d digest_items=%d",
+            len(processing.materials),
+            len(processing.cluster_batch.clusters),
+            len(processing.digest_items),
         )
         digest = self._composer.compose(
             processing.digest_items,
@@ -271,6 +338,11 @@ class PipelineRunner:
             channel_id=str(self._channel_id) if digest is not None else None,
         )
         if digest is not None:
+            logger.info(
+                "sending backfill digest: digest_id=%s posts=%d",
+                digest.id,
+                len(digest.posts),
+            )
             await self._delivery.send(digest)
 
         await self._repository.save_processing_result(
@@ -407,7 +479,12 @@ async def run_from_env() -> PipelineRunReport:
 
 
 def main() -> None:
-    logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
+    logging.basicConfig(
+        level=os.environ.get("LOG_LEVEL", "INFO"),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    # httpx includes the complete Telegram Bot API URL (and its token) in INFO logs.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     report = asyncio.run(run_from_env())
     logger.info("pipeline completed: %s", report)
 

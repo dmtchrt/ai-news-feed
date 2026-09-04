@@ -435,3 +435,143 @@ async def test_pipeline_runner_backfill_ignores_cursor_and_forwards_explicit_cut
     stored_source = (await repository.list_sources())[0]
     assert stored_source.cursor is not None
     assert stored_source.cursor.external_id == "1"
+
+
+class _CrashingConnector:
+    async def collect(
+        self,
+        config: SourceConfig,
+        cursor: CollectionCursor | None = None,
+    ) -> CollectionBatch:
+        del config, cursor
+        raise TimeoutError
+
+
+@pytest.mark.asyncio
+async def test_pipeline_runner_survives_one_connector_crashing() -> None:
+    """Regression: a source's connector raising instead of returning a CollectionBatch
+    (e.g. site.py handing httpx an unfetchable URL) used to take down run() entirely --
+    no digest at all, not even for the other, healthy sources."""
+    now = datetime(2026, 8, 31, 9, tzinfo=UTC)
+    good_source = SourceConfig(
+        id="good",
+        kind=SourceKind.WEBSITE,
+        locator="https://example.test/feed.xml",
+        collector=CollectorKind.NATIVE_RSS,
+    )
+    broken_source = SourceConfig(
+        id="broken",
+        kind=SourceKind.WEBSITE,
+        locator="https://a-ai.ru/",
+        collector=CollectorKind.UNIVERSAL_SCRAPER,
+    )
+    profile = InterestProfile(
+        id="default",
+        name="Основные интересы",
+        description="ИИ-агенты",
+        created_at=now,
+        updated_at=now,
+    )
+    material = Material(
+        id="material",
+        source_id=good_source.id,
+        external_id="1",
+        original_url="https://example.test/1",
+        published_at=now,
+        fetched_at=now,
+        title="Автономные агенты",
+        text="Подробный текст новости про автономных агентов.",
+        content_hash="a" * 64,
+    )
+    cluster = NewsCluster(
+        id="cluster",
+        material_ids=(material.id,),
+        representative_id=material.id,
+        similarities={material.id: 1.0},
+    )
+    screening = ScreeningResult(
+        cluster_id=cluster.id,
+        relevance_score=0.9,
+        noise_score=0.1,
+        reason="По теме.",
+        model="screen",
+        prompt_version="screen-v1",
+    )
+    item = DigestItem(
+        cluster_id=cluster.id,
+        summary="Вышло обновление автономных агентов.",
+        source_links=(material.original_url,),
+        model="summary",
+        prompt_version="summary-v1",
+    )
+    processing = AIProcessingResult(
+        materials=(material,),
+        exact_deduplication=ExactDeduplicationResult(unique_materials=(material,)),
+        cluster_batch=ClusterBatch(clusters=(cluster,)),
+        screening_results=(screening,),
+        digest_items=(item,),
+    )
+    repository = InMemoryRepository(
+        sources=(good_source, broken_source),
+        interest_profiles=(profile,),
+    )
+    bot = _Bot()
+    delivery = TelegramDelivery(bot=bot, repository=repository, channel_id=-100123)
+    runner = PipelineRunner(
+        repository=repository,
+        connectors={
+            CollectorKind.NATIVE_RSS: _Connector(),
+            CollectorKind.UNIVERSAL_SCRAPER: _CrashingConnector(),
+        },
+        processor=_Processor(processing),
+        delivery=delivery,
+        channel_id=-100123,
+    )
+
+    report = await runner.run()
+
+    assert report.sources == 2
+    assert report.collected_items == 1
+    assert report.digest_posts == 1
+    assert len(bot.posts) == 1
+    sources_by_id = {source.id: source for source in await repository.list_sources()}
+    assert sources_by_id["good"].cursor is not None
+    assert sources_by_id["broken"].cursor is None
+
+
+@pytest.mark.asyncio
+async def test_pipeline_runner_backfill_survives_connector_crashing() -> None:
+    """Same guard as run(): the on-demand catch-up must not let one connector's
+    exception kill the whole backfill either."""
+    now = datetime(2026, 8, 31, 9, tzinfo=UTC)
+    source = SourceConfig(
+        id="broken",
+        kind=SourceKind.WEBSITE,
+        locator="https://a-ai.ru/",
+        collector=CollectorKind.UNIVERSAL_SCRAPER,
+    )
+    profile = InterestProfile(
+        id="default",
+        name="Основные интересы",
+        description="ИИ-агенты",
+        created_at=now,
+        updated_at=now,
+    )
+    repository = InMemoryRepository(sources=(source,), interest_profiles=(profile,))
+    bot = _Bot()
+    delivery = TelegramDelivery(bot=bot, repository=repository, channel_id=-100123)
+    runner = PipelineRunner(
+        repository=repository,
+        connectors={CollectorKind.UNIVERSAL_SCRAPER: _CrashingConnector()},
+        processor=_EmptyProcessor(),
+        delivery=delivery,
+        channel_id=-100123,
+    )
+
+    report = await runner.run_backfill(min_published_at=datetime(2020, 1, 1, tzinfo=UTC))
+
+    assert report.collected_items == 0
+    assert report.digest_posts == 0
+    assert bot.posts == []
+    stored_source = (await repository.list_sources())[0]
+    assert stored_source.cursor is None

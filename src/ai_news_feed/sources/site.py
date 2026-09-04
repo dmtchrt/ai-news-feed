@@ -203,6 +203,8 @@ def _discover_links(
         if not isinstance(href, str) or not href.strip():
             continue
         url = canonical_absolute_url(base_url, href)
+        if not url.startswith(("http://", "https://")):
+            continue
         if include and not include.search(url):
             continue
         if exclude and exclude.search(url):

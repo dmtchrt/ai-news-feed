@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import mimetypes
 import re
 import tempfile
@@ -50,6 +51,7 @@ class TelethonSettings(BaseModel):
 
     max_items: int = Field(default=100, ge=1, le=1000)
     download_documents: bool = True
+    timeout_seconds: float = Field(default=60.0, gt=0, le=300)
 
 
 class TelegramWebPreviewConnector:
@@ -192,13 +194,22 @@ class TelethonConnector:
         errors: list[CollectionError] = []
         seen_ids: list[int] = []
         try:
-            messages = self._client.iter_messages(
-                handle,
-                min_id=last_message_id,
-                reverse=True,
-                limit=settings.max_items,
+            messages = aiter(
+                self._client.iter_messages(
+                    handle,
+                    min_id=last_message_id,
+                    reverse=True,
+                    limit=settings.max_items,
+                )
             )
-            async for message in messages:
+            while True:
+                try:
+                    message = await asyncio.wait_for(
+                        anext(messages),
+                        timeout=settings.timeout_seconds,
+                    )
+                except StopAsyncIteration:
+                    break
                 message_id = int(message.id)
                 seen_ids.append(message_id)
                 attachments = await self._message_attachments(
@@ -227,6 +238,11 @@ class TelethonConnector:
                 )
                 items.append(item)
         except Exception as exc:  # Telethon exposes many RPC/network exception subclasses.
+            message = (
+                f"Telethon message iteration timed out after {settings.timeout_seconds:g} seconds"
+                if isinstance(exc, TimeoutError)
+                else f"{type(exc).__name__}: {error_message(exc)}"
+            )
             return CollectionBatch(
                 raw_items=tuple(items),
                 next_cursor=active_cursor,
@@ -235,7 +251,7 @@ class TelethonConnector:
                     CollectionError(
                         source_id=config.id,
                         code="telethon_collect_failed",
-                        message=f"{type(exc).__name__}: {exc}",
+                        message=message,
                         retryable=True,
                     ),
                 ),
@@ -280,7 +296,10 @@ class TelethonConnector:
             source_dir.mkdir(parents=True, exist_ok=True)
             target = source_dir / f"{message.id}-{name}"
             try:
-                downloaded = await self._client.download_media(message, file=str(target))
+                downloaded = await asyncio.wait_for(
+                    self._client.download_media(message, file=str(target)),
+                    timeout=settings.timeout_seconds,
+                )
                 if downloaded:
                     download_ref = str(Path(str(downloaded)).resolve())
                 elif target.exists():
@@ -288,11 +307,16 @@ class TelethonConnector:
                 else:
                     raise OSError("Telethon returned no downloaded file")
             except Exception as exc:  # Telethon download errors include RPC subclasses.
+                message_text = (
+                    f"Telethon media download timed out after {settings.timeout_seconds:g} seconds"
+                    if isinstance(exc, TimeoutError)
+                    else error_message(exc)
+                )
                 errors.append(
                     CollectionError(
                         source_id=config.id,
                         code="attachment_download_failed",
-                        message=error_message(exc),
+                        message=message_text,
                         external_id=str(message.id),
                         retryable=True,
                     )

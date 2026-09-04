@@ -326,6 +326,12 @@ def build_application(
 
 
 def main() -> None:
+    logging.basicConfig(
+        level=os.environ.get("LOG_LEVEL", "INFO"),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    # httpx includes the complete Telegram Bot API URL (and its token) in INFO logs.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     token = _required_env("TELEGRAM_BOT_TOKEN")
     database_url = _required_env("DATABASE_URL")
     owner_user_id = int(_required_env("TELEGRAM_OWNER_USER_ID"))

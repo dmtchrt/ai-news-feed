@@ -6,7 +6,12 @@ import pytest
 
 from ai_news_feed.extraction import ContentExtractor, ExtractedItem
 from ai_news_feed.sources.presets import ict_moscow_source
-from ai_news_feed.sources.site import UniversalSiteConnector, _ensure_utc
+from ai_news_feed.sources.site import (
+    UniversalSiteConnector,
+    UniversalSiteSettings,
+    _discover_links,
+    _ensure_utc,
+)
 
 
 @pytest.mark.asyncio
@@ -79,3 +84,18 @@ def test_ensure_utc_treats_naive_datetime_as_moscow_local_time() -> None:
 def test_ensure_utc_keeps_an_explicit_offset_unchanged_in_value() -> None:
     aware = datetime(2026, 9, 2, 1, 0, tzinfo=UTC)
     assert _ensure_utc(aware) == aware
+
+
+def test_discover_links_skips_non_http_schemes() -> None:
+    """Regression: a mailto:/tel: link on a listing page used to reach canonical_absolute_url
+    unfiltered and come out as a candidate "article" URL. client.get() on that non-http URL
+    doesn't fail cleanly -- httpx's cookie handling hands it to urllib's Request, which raises
+    a raw ValueError("unknown url type") that used to crash the whole source instead of being
+    skipped like any other non-matching link."""
+    html = (
+        '<a href="/analytics/real-article">Реальная статья</a>'
+        '<a href="mailto:info@a-ai.ru">Написать нам</a>'
+        '<a href="tel:+79991234567">Позвонить</a>'
+    )
+    links = _discover_links(html, "https://a-ai.ru/analytics/", UniversalSiteSettings())
+    assert [url for url, _title in links] == ["https://a-ai.ru/analytics/real-article"]
